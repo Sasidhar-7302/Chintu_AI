@@ -75,11 +75,3 @@ Chimptu/
 └── setup_env.bat         # Installation script
 ```
 
-## 🤝 Contributing
-
-Contributions are welcome! Please check the `docs/` folder for architectural details before submitting a Pull Request.
-
-## License
-
-**Private Project - All Rights Reserved.**
-Unauthorized copying, modification, distribution, or use of this software is strictly prohibited.
