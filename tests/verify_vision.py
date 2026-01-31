@@ -3,7 +3,7 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from chintu.vision.omniparser import OmniParser, GEMINI_AVAILABLE
+from chintu_backend.vision.omniparser import OmniParser, GEMINI_AVAILABLE
 print(f"GEMINI_AVAILABLE: {GEMINI_AVAILABLE}")
 
 if GEMINI_AVAILABLE:

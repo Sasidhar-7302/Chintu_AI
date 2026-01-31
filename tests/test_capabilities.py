@@ -12,11 +12,11 @@ from unittest.mock import patch, MagicMock
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chintu.core.capabilities import (
+from chintu_backend.core.capabilities import (
     Capability, CapabilityType, ActionResult, 
     CapabilityRegistry, get_registry
 )
-from chintu.core.capability_handlers import (
+from chintu_backend.core.capability_handlers import (
     handle_open_app, handle_open_url, handle_system_info, 
     handle_note_taking, handle_conversation, register_core_capabilities
 )
@@ -51,7 +51,7 @@ class TestCapabilityRegistry:
     
     def setup_method(self):
         """Reset registry for each test."""
-        from chintu.core.capabilities import _registry
+        from chintu_backend.core.capabilities import _registry
         global _registry
         _registry = None
     
@@ -126,8 +126,8 @@ class TestCapabilityRegistry:
 class TestOpenAppCapability:
     """Tests for open_app capability."""
     
-    @patch('chintu.platform.app_discovery.subprocess.Popen')
-    @patch('chintu.platform.app_discovery.os.startfile', create=True)
+    @patch('chintu_backend.platform.app_discovery.subprocess.Popen')
+    @patch('chintu_backend.platform.app_discovery.os.startfile', create=True)
     def test_open_chrome(self, mock_startfile, mock_popen):
         result = handle_open_app("open chrome", {})
         assert result.success is True
@@ -135,8 +135,8 @@ class TestOpenAppCapability:
         # Either popen or startfile called depending on discovery
         assert mock_popen.called or mock_startfile.called
     
-    @patch('chintu.platform.app_discovery.subprocess.Popen')
-    @patch('chintu.platform.app_discovery.os.startfile', create=True)
+    @patch('chintu_backend.platform.app_discovery.subprocess.Popen')
+    @patch('chintu_backend.platform.app_discovery.os.startfile', create=True)
     def test_open_notepad(self, mock_startfile, mock_popen):
         result = handle_open_app("launch notepad", {})
         assert result.success is True
@@ -144,7 +144,7 @@ class TestOpenAppCapability:
         # Either popen or startfile called
         assert mock_popen.called or mock_startfile.called
     
-    @patch('chintu.core.capability_handlers.webbrowser.open')
+    @patch('chintu_backend.core.capability_handlers.webbrowser.open')
     def test_unknown_app(self, mock_browser):
         result = handle_open_app("open foobar123", {})
         assert result.success is True  # Fails back to Google search
@@ -155,9 +155,9 @@ class TestOpenAppCapability:
 class TestOpenUrlCapability:
     """Tests for open_url capability."""
     
-    @patch('chintu.core.capability_handlers.webbrowser.open')
-    @patch('chintu.core.capability_handlers.subprocess.Popen')
-    @patch('chintu.memory.preferences.get_preference_manager')
+    @patch('chintu_backend.core.capability_handlers.webbrowser.open')
+    @patch('chintu_backend.core.capability_handlers.subprocess.Popen')
+    @patch('chintu_backend.memory.preferences.get_preference_manager')
     def test_open_google(self, mock_prefs, mock_popen, mock_browser):
         prefs = SimpleNamespace(default_browser="chrome", confirmation_required=False)
         mock_prefs.return_value = SimpleNamespace(preferences=prefs, track_site_usage=lambda site: None)
@@ -167,9 +167,9 @@ class TestOpenUrlCapability:
         assert args[0][0] == "chrome"
         assert args[0][1] == "https://www.google.com"
     
-    @patch('chintu.core.capability_handlers.webbrowser.open')
-    @patch('chintu.core.capability_handlers.subprocess.Popen')
-    @patch('chintu.memory.preferences.get_preference_manager')
+    @patch('chintu_backend.core.capability_handlers.webbrowser.open')
+    @patch('chintu_backend.core.capability_handlers.subprocess.Popen')
+    @patch('chintu_backend.memory.preferences.get_preference_manager')
     def test_open_youtube(self, mock_prefs, mock_popen, mock_browser):
         prefs = SimpleNamespace(default_browser="chrome", confirmation_required=False)
         mock_prefs.return_value = SimpleNamespace(preferences=prefs, track_site_usage=lambda site: None)
@@ -223,7 +223,7 @@ class TestCoreCapabilitiesRegistration:
     
     def setup_method(self):
         """Reset registry for each test."""
-        from chintu.core import capabilities
+        from chintu_backend.core import capabilities
         capabilities._registry = None
     
     def test_all_capabilities_registered(self):

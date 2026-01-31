@@ -22,8 +22,6 @@ class CodeApprovalDialog extends StatelessWidget {
       backgroundColor: Colors.transparent,
       insetPadding: const EdgeInsets.all(24),
       child: GlassCard(
-        blur: 30,
-        opacity: 0.85,
         borderRadius: BorderRadius.circular(24),
         padding: const EdgeInsets.all(24),
         child: Column(

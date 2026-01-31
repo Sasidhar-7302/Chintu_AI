@@ -73,12 +73,12 @@ def test_chintu_modules():
     print("\n=== Testing Chintu Modules ===")
 
     checks = [
-        ("chintu.core", "Core modules"),
-        ("chintu.audio", "Audio modules"),
-        ("chintu.vision", "Vision modules"),
-        ("chintu.automation", "Automation modules"),
-        ("chintu.llm", "LLM module"),
-        ("chintu.utils", "Utils modules"),
+        ("chintu_backend.core", "Core modules"),
+        ("chintu_backend.audio", "Audio modules"),
+        ("chintu_backend.vision", "Vision modules"),
+        ("chintu_backend.automation", "Automation modules"),
+        ("chintu_backend.llm", "LLM module"),
+        ("chintu_backend.utils", "Utils modules"),
     ]
 
     all_passed = True
@@ -94,7 +94,7 @@ def test_command_parser():
     """Test the command parser."""
     print("\n=== Testing Command Parser ===")
 
-    from chintu.utils import CommandParser
+    from chintu_backend.utils import CommandParser
 
     parser = CommandParser()
 
@@ -120,7 +120,7 @@ def test_one_euro_filter():
     """Test the One Euro Filter."""
     print("\n=== Testing One Euro Filter ===")
 
-    from chintu.utils import OneEuroFilter
+    from chintu_backend.utils import OneEuroFilter
     import numpy as np
 
     f = OneEuroFilter(freq=30.0, min_cutoff=1.0, beta=0.007)
@@ -196,7 +196,7 @@ def test_ollama():
     print("\n=== Testing Ollama ===")
 
     try:
-        from chintu.llm import OllamaClient
+        from chintu_backend.llm import OllamaClient
         client = OllamaClient()
         if client.is_available:
             _print_result(True, "Ollama client")

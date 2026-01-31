@@ -21,12 +21,12 @@ class TestPolicyEngine:
     
     def setup_method(self):
         """Reset policy engine for each test."""
-        from chintu.core.policy import reset_policy_engine
+        from chintu_backend.core.policy import reset_policy_engine
         reset_policy_engine()
     
     def test_risk_levels_defined(self):
         """Verify all risk levels are defined."""
-        from chintu.core.policy import RiskLevel
+        from chintu_backend.core.policy import RiskLevel
         
         assert hasattr(RiskLevel, 'NONE')
         assert hasattr(RiskLevel, 'LOW')
@@ -36,7 +36,7 @@ class TestPolicyEngine:
     
     def test_policy_decisions_defined(self):
         """Verify all policy decisions are defined."""
-        from chintu.core.policy import PolicyDecision
+        from chintu_backend.core.policy import PolicyDecision
         
         assert hasattr(PolicyDecision, 'ALLOW')
         assert hasattr(PolicyDecision, 'REQUIRE_CONFIRMATION')
@@ -45,7 +45,7 @@ class TestPolicyEngine:
     
     def test_default_contracts_exist(self):
         """Verify default contracts are defined for key capabilities."""
-        from chintu.core.policy import get_policy_engine
+        from chintu_backend.core.policy import get_policy_engine
         
         engine = get_policy_engine()
         
@@ -57,7 +57,7 @@ class TestPolicyEngine:
     
     def test_safe_capability_allowed(self):
         """Verify safe capabilities are allowed."""
-        from chintu.core.policy import get_policy_engine, PolicyDecision
+        from chintu_backend.core.policy import get_policy_engine, PolicyDecision
         
         engine = get_policy_engine()
         policy = engine.evaluate("help")
@@ -66,7 +66,7 @@ class TestPolicyEngine:
     
     def test_destructive_requires_confirmation(self):
         """Verify destructive capabilities require confirmation."""
-        from chintu.core.policy import get_policy_engine, PolicyDecision
+        from chintu_backend.core.policy import get_policy_engine, PolicyDecision
         
         engine = get_policy_engine()
         policy = engine.evaluate("forget")
@@ -75,7 +75,7 @@ class TestPolicyEngine:
     
     def test_offline_denies_web_capability(self):
         """Verify web capabilities are denied when offline."""
-        from chintu.core.policy import get_policy_engine, PolicyDecision
+        from chintu_backend.core.policy import get_policy_engine, PolicyDecision
         
         engine = get_policy_engine()
         engine.update_system_state(has_internet=False)
@@ -91,12 +91,12 @@ class TestBudgetManager:
     
     def setup_method(self):
         """Reset budget manager for each test."""
-        from chintu.core.budget_manager import reset_budget_manager
+        from chintu_backend.core.budget_manager import reset_budget_manager
         reset_budget_manager()
     
     def test_initial_state(self):
         """Verify initial state allows all providers."""
-        from chintu.core.budget_manager import get_budget_manager
+        from chintu_backend.core.budget_manager import get_budget_manager
         
         manager = get_budget_manager()
         
@@ -106,7 +106,7 @@ class TestBudgetManager:
     
     def test_record_usage(self):
         """Verify usage recording works."""
-        from chintu.core.budget_manager import get_budget_manager
+        from chintu_backend.core.budget_manager import get_budget_manager
         
         manager = get_budget_manager()
         
@@ -119,7 +119,7 @@ class TestBudgetManager:
     
     def test_caching(self):
         """Verify response caching works."""
-        from chintu.core.budget_manager import get_budget_manager
+        from chintu_backend.core.budget_manager import get_budget_manager
         
         manager = get_budget_manager()
         
@@ -132,7 +132,7 @@ class TestBudgetManager:
     
     def test_cache_miss(self):
         """Verify cache miss returns None."""
-        from chintu.core.budget_manager import get_budget_manager
+        from chintu_backend.core.budget_manager import get_budget_manager
         
         manager = get_budget_manager()
         cached = manager.get_cached("something not cached")
@@ -141,7 +141,7 @@ class TestBudgetManager:
     
     def test_best_provider_selection(self):
         """Verify best provider selection."""
-        from chintu.core.budget_manager import get_budget_manager
+        from chintu_backend.core.budget_manager import get_budget_manager
         
         manager = get_budget_manager()
         
@@ -159,12 +159,12 @@ class TestDegradedMode:
     
     def setup_method(self):
         """Reset degraded mode for each test."""
-        from chintu.core.degraded_mode import reset_degraded_mode
+        from chintu_backend.core.degraded_mode import reset_degraded_mode
         reset_degraded_mode()
     
     def test_offline_safe_capabilities(self):
         """Verify offline-safe capabilities are always available."""
-        from chintu.core.degraded_mode import get_degraded_mode, SystemMode
+        from chintu_backend.core.degraded_mode import get_degraded_mode, SystemMode
         
         manager = get_degraded_mode()
         manager.set_mode(SystemMode.OFFLINE)
@@ -176,7 +176,7 @@ class TestDegradedMode:
     
     def test_internet_required_offline(self):
         """Verify internet-required capabilities unavailable offline."""
-        from chintu.core.degraded_mode import get_degraded_mode, SystemMode
+        from chintu_backend.core.degraded_mode import get_degraded_mode, SystemMode
         
         manager = get_degraded_mode()
         manager.set_mode(SystemMode.OFFLINE)
@@ -188,7 +188,7 @@ class TestDegradedMode:
     
     def test_mode_message(self):
         """Verify mode messages are descriptive."""
-        from chintu.core.degraded_mode import get_degraded_mode, SystemMode
+        from chintu_backend.core.degraded_mode import get_degraded_mode, SystemMode
         
         manager = get_degraded_mode()
         
@@ -203,12 +203,12 @@ class TestMetrics:
     
     def setup_method(self):
         """Reset metrics for each test."""
-        from chintu.core.metrics import reset_metrics
+        from chintu_backend.core.metrics import reset_metrics
         reset_metrics()
     
     def test_record_latency(self):
         """Verify latency recording works."""
-        from chintu.core.metrics import get_metrics
+        from chintu_backend.core.metrics import get_metrics
         
         metrics = get_metrics()
         
@@ -221,7 +221,7 @@ class TestMetrics:
     
     def test_model_usage(self):
         """Verify model usage tracking."""
-        from chintu.core.metrics import get_metrics
+        from chintu_backend.core.metrics import get_metrics
         
         metrics = get_metrics()
         
@@ -234,7 +234,7 @@ class TestMetrics:
     
     def test_error_tracking(self):
         """Verify error tracking."""
-        from chintu.core.metrics import get_metrics
+        from chintu_backend.core.metrics import get_metrics
         
         metrics = get_metrics()
         
@@ -252,12 +252,12 @@ class TestExecutiveBrain:
     
     def setup_method(self):
         """Reset executive brain for each test."""
-        from chintu.core.executive import reset_executive_brain
+        from chintu_backend.core.executive import reset_executive_brain
         reset_executive_brain()
     
     def test_task_analysis(self):
         """Verify task analysis identifies multi-step tasks."""
-        from chintu.core.executive import get_executive_brain
+        from chintu_backend.core.executive import get_executive_brain
         
         brain = get_executive_brain()
         
@@ -271,7 +271,7 @@ class TestExecutiveBrain:
     
     def test_plan_creation(self):
         """Verify plan creation works."""
-        from chintu.core.executive import get_executive_brain, ExecutionPhase
+        from chintu_backend.core.executive import get_executive_brain, ExecutionPhase
         
         brain = get_executive_brain()
         
@@ -286,7 +286,7 @@ class TestExecutiveBrain:
     
     def test_plan_cancellation(self):
         """Verify plan can be cancelled."""
-        from chintu.core.executive import get_executive_brain, ExecutionPhase
+        from chintu_backend.core.executive import get_executive_brain, ExecutionPhase
         
         brain = get_executive_brain()
         
@@ -312,7 +312,7 @@ class TestGoldData:
     
     def test_log_interaction(self):
         """Verify interaction logging."""
-        from chintu.training.gold_data import GoldDataManager
+        from chintu_backend.training.gold_data import GoldDataManager
         
         manager = GoldDataManager(self.temp_dir)
         
@@ -329,7 +329,7 @@ class TestGoldData:
     
     def test_approve_interaction(self):
         """Verify interaction approval."""
-        from chintu.training.gold_data import GoldDataManager
+        from chintu_backend.training.gold_data import GoldDataManager
         
         manager = GoldDataManager(self.temp_dir)
         

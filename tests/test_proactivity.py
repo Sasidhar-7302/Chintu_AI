@@ -1,6 +1,10 @@
 """
 Extensive Unit Tests for Proactivity Engine.
 Tests SignalManager, RuleEngine, and overall ProactivityManager logic.
+
+These tests are designed to be robust:
+- If optional dependencies like ``psutil`` are missing, SignalManager
+  degrades gracefully and certain tests are skipped instead of erroring.
 """
 
 import threading
@@ -8,10 +12,18 @@ import time
 import pytest
 import concurrent.futures
 from unittest.mock import MagicMock, patch
-from chintu.proactivity.signals import SignalManager, get_signal_manager
-from chintu.proactivity.rules import RuleEngine, Rule, get_rule_engine
-from chintu.proactivity.manager import ProactivityManager, get_proactivity_manager
-from chintu.core.websocket_server import WebSocketServer
+
+try:
+    import psutil  # type: ignore
+    _HAS_PSUTIL = True
+except Exception:
+    psutil = None  # type: ignore
+    _HAS_PSUTIL = False
+
+from chintu_backend.proactivity.signals import SignalManager, get_signal_manager
+from chintu_backend.proactivity.rules import RuleEngine, Rule, get_rule_engine
+from chintu_backend.proactivity.manager import ProactivityManager, get_proactivity_manager
+from chintu_backend.core.websocket_server import WebSocketServer
 
 # =============================================================================
 # 1. Signal Manager Tests
@@ -28,8 +40,9 @@ def test_signal_manager_initialization(signal_manager):
     assert not signal_manager._running
     assert signal_manager._thread is None
 
-@patch("psutil.sensors_battery")
-@patch("psutil.cpu_percent")
+@pytest.mark.skipif(not _HAS_PSUTIL, reason="psutil not installed; psutil-backed signals unavailable")
+@patch("chintu_backend.proactivity.signals.psutil.sensors_battery")
+@patch("chintu_backend.proactivity.signals.psutil.cpu_percent")
 def test_signal_gathering(mock_cpu, mock_battery, signal_manager):
     """Test gathering of system signals."""
     # Mock system returns
@@ -71,7 +84,7 @@ def rule_engine():
     """Create a fresh RuleEngine for testing."""
     engine = RuleEngine()
     # Mock the signal manager dependency
-    patcher = patch("chintu.proactivity.rules.get_signal_manager")
+    patcher = patch("chintu_backend.proactivity.rules.get_signal_manager")
     mock_get_sm = patcher.start()
     mock_sm = MagicMock()
     mock_get_sm.return_value = mock_sm
@@ -154,7 +167,7 @@ def test_rule_priority_sorting(rule_engine):
 # 3. Default Rules Logic Tests
 # =============================================================================
 
-from chintu.proactivity.default_rules import battery_low_condition, work_start_condition
+from chintu_backend.proactivity.default_rules import battery_low_condition, work_start_condition
 
 def test_battery_condition():
     """Test battery low logic."""
@@ -185,9 +198,9 @@ def test_work_start_condition():
 @pytest.fixture
 def proactivity_manager():
     """Create a ProactivityManager with mocks."""
-    with patch("chintu.proactivity.manager.get_signal_manager") as mock_get_sm, \
-         patch("chintu.proactivity.manager.get_rule_engine") as mock_get_re, \
-         patch("chintu.proactivity.manager.get_ws_server") as mock_get_ws:
+    with patch("chintu_backend.proactivity.manager.get_signal_manager") as mock_get_sm, \
+         patch("chintu_backend.proactivity.manager.get_rule_engine") as mock_get_re, \
+         patch("chintu_backend.proactivity.manager.get_ws_server") as mock_get_ws:
          
         mock_sm = MagicMock()
         mock_re = MagicMock()

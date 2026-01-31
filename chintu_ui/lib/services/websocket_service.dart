@@ -6,6 +6,8 @@ import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../models/a2ui.dart';
+
 class WebSocketService extends ChangeNotifier {
   WebSocketChannel? _channel;
   bool _isConnected = false;
@@ -16,6 +18,9 @@ class WebSocketService extends ChangeNotifier {
   List<Map<String, dynamic>> _capabilities = [];
   final List<Map<String, dynamic>> _messages = [];
   Timer? _reconnectTimer;
+  List<Map<String, String>> _activityLog = [];
+  final List<Map<String, dynamic>> _backendLogs = [];
+  List<Map<String, dynamic>> _scheduledTasks = [];
   String _lastResponse = '';
   String _lastCommand = '';
   List<bool> _wakeWordSamples = List<bool>.filled(5, false);
@@ -24,6 +29,13 @@ class WebSocketService extends ChangeNotifier {
   String _wakeWordTrainingMessage = '';
   int? _wakeWordRecordingIndex;
   bool _greetingSent = false;
+  String _targetHost = '127.0.0.1';
+  int? _targetPort;
+  String _resolvedHost = '127.0.0.1';
+  int _resolvedPort = 8765;
+  final List<A2UIView> _a2uiViews = [];
+  bool _triedDefaultPort = false;
+  Map<String, dynamic> _hud = {};
 
   WebSocketService() { connect(); }
 
@@ -40,9 +52,36 @@ class WebSocketService extends ChangeNotifier {
   String get wakeWordTrainingStatus => _wakeWordTrainingStatus;
   String get wakeWordTrainingMessage => _wakeWordTrainingMessage;
   int? get wakeWordRecordingIndex => _wakeWordRecordingIndex;
+  String get resolvedHost => _resolvedHost;
+  int get resolvedPort => _resolvedPort;
+  bool get usingAutoPort => _targetPort == null;
+  List<A2UIView> get a2uiViews => List.unmodifiable(_a2uiViews);
+  List<Map<String, String>> get activityLog => _activityLog;
+  List<Map<String, dynamic>> get backendLogs => List.unmodifiable(_backendLogs);
+  List<Map<String, dynamic>> get scheduledTasks => _scheduledTasks;
+  Map<String, dynamic> get hud => _hud;
 
-  Future<void> connect({String host = '127.0.0.1', int port = 8765}) async {
-    await _tryConnect(host, port);
+  bool hasA2UIView({String? kind, String? category}) {
+    for (final view in _a2uiViews) {
+      if (kind != null && kind.isNotEmpty && view.kind == kind) {
+        return true;
+      }
+      if (category != null && category.isNotEmpty) {
+        final metaCategory = view.meta['category']?.toString() ?? '';
+        if (metaCategory == category) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  Future<void> connect({String host = '127.0.0.1', int? port}) async {
+    _targetHost = host;
+    _targetPort = port;
+    _triedDefaultPort = false;
+    final resolved = await _resolveEndpoint();
+    await _tryConnect(resolved.host, resolved.port);
   }
 
   Future<void> _tryConnect(String host, int port) async {
@@ -51,40 +90,66 @@ class WebSocketService extends ChangeNotifier {
       _channel = IOWebSocketChannel(socket);
       _channel!.stream.listen(
         _onMessage,
-        onError: (error) => _handleDisconnect(host, port),
-        onDone: () => _handleDisconnect(host, port),
+        onError: (error) => _handleDisconnect(),
+        onDone: () => _handleDisconnect(),
       );
       _isConnected = true;
+      _lastResponse = '';
+      _lastCommand = '';
+      _messages.clear();
+      _sendClientCapabilities();
       _sendGreeting();
       notifyListeners();
     } catch (e) {
       _isConnected = false;
       notifyListeners();
-      _scheduleReconnect(host, port);
+      if (_targetPort == null && !_triedDefaultPort && port != 8765) {
+        _triedDefaultPort = true;
+        _resolvedHost = host;
+        _resolvedPort = 8765;
+        notifyListeners();
+        await _tryConnect(host, 8765);
+        return;
+      }
+      _scheduleReconnect();
+    }
+  }
+
+  void _sendClientCapabilities() {
+    if (!_isConnected || _channel == null) return;
+    try {
+      _channel!.sink.add(jsonEncode({
+        'type': 'client_capabilities',
+        'data': {
+          'a2ui': {
+            'supported': true,
+            'schema_version': 'a2ui-1.0',
+          },
+          'platform': Platform.operatingSystem,
+        },
+      }));
+    } catch (_) {
+      // Best-effort capability registration.
     }
   }
 
   void _sendGreeting() {
     if (!_greetingSent) {
       _greetingSent = true;
-      /* Hardcoded greeting removed - Backend now sends dynamic greeting
-      _messages.add({
-        'role': 'assistant',
-        'content': 'Hello Sasidhar! I am Chintu, your personal AI assistant. Say "Hey Chintu" to wake me up, or type a command below.',
-      });
-      */
+      // No hardcoded greeting - backend sends the exact greeting from logs
+      // The greeting will appear via 'response' message type or 'state_update' with last_response
     }
   }
 
-  void _handleDisconnect(String host, int port) {
+  void _handleDisconnect() {
     _isConnected = false;
     notifyListeners();
-    _scheduleReconnect(host, port);
+    _scheduleReconnect();
   }
 
-  void _scheduleReconnect(String host, int port) {
+  void _scheduleReconnect() {
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(const Duration(seconds: 2), () => _tryConnect(host, port));
+    _reconnectTimer = Timer(const Duration(seconds: 2), () => _retryConnect());
   }
 
   // Code Approval Stream
@@ -120,7 +185,15 @@ class WebSocketService extends ChangeNotifier {
           break;
         case 'response':
           final text = message['text'] as String? ?? '';
-          if (text.isNotEmpty) _addMessage('assistant', text);
+          if (text.isNotEmpty) {
+            // Ensure we don't duplicate the greeting - check if it's already in messages
+            final isDuplicate = _messages.any((msg) => 
+              msg['role'] == 'assistant' && msg['content'] == text
+            );
+            if (!isDuplicate) {
+              _addMessage('assistant', text);
+            }
+          }
           break;
         case 'gesture':
           _gesture = message['gesture'] as String? ?? '';
@@ -143,8 +216,26 @@ class WebSocketService extends ChangeNotifier {
         case 'code_approval_request':
           _approvalRequestController.add(message);
           break;
+        case 'a2ui_render':
+          _handleA2UIRender(message['data'] as Map<String, dynamic>? ?? {});
+          break;
+        case 'a2ui_update':
+          _handleA2UIRender(message['data'] as Map<String, dynamic>? ?? {});
+          break;
+        case 'a2ui_clear':
+          _handleA2UIClear(message['data'] as Map<String, dynamic>? ?? {});
+          break;
+        case 'a2ui_toast':
+          _handleA2UIToast(message['data'] as Map<String, dynamic>? ?? {});
+          break;
+        case 'a2ui_action_result':
+          _handleA2UIActionResult(message['data'] as Map<String, dynamic>? ?? {});
+          break;
         case 'error':
           _handleError(message['data'] as Map<String, dynamic>? ?? {});
+          break;
+        case 'log_event':
+          _handleLogEvent(message['data'] as Map<String, dynamic>? ?? {});
           break;
       }
       notifyListeners();
@@ -161,6 +252,22 @@ class WebSocketService extends ChangeNotifier {
         'approved': approved
       }));
     }
+  }
+
+  Future<void> sendA2UIAction(
+    String viewId,
+    String actionId, {
+    Map<String, dynamic>? payload,
+    Map<String, dynamic>? form,
+  }) async {
+    if (!_isConnected || _channel == null) return;
+    final data = encodeA2UIActionPayload(
+      viewId: viewId,
+      actionId: actionId,
+      payload: payload,
+      form: form,
+    );
+    _channel!.sink.add(data);
   }
 
   void _handleStateUpdate(Map<String, dynamic> data) {
@@ -185,7 +292,30 @@ class WebSocketService extends ChangeNotifier {
           'status': status,
           'active': enabled && status == 'active',
         };
+        return {
+          'id': entry.key,
+          'name': value['name'] ?? entry.key,
+          'enabled': enabled,
+          'status': status,
+          'active': enabled && status == 'active',
+        };
       }).toList();
+    }
+    
+    // Parse Control Center Data
+    final logs = data['activity_log'] as List?;
+    if (logs != null) {
+      _activityLog = logs.map((e) => Map<String, String>.from(e)).toList();
+    }
+    
+    final tasks = data['scheduled_tasks'] as List?;
+    if (tasks != null) {
+      _scheduledTasks = tasks.map((e) => Map<String, dynamic>.from(e)).toList();
+    }
+
+    final hudData = data['hud'] as Map<String, dynamic>?;
+    if (hudData != null) {
+      _hud = Map<String, dynamic>.from(hudData);
     }
 
     // Refined Fix: Streaming updates for USER
@@ -219,11 +349,20 @@ class WebSocketService extends ChangeNotifier {
     if (lastResponse.isNotEmpty && lastResponse != _lastResponse) {
       _lastResponse = lastResponse;
       
-      // Update existing assistant bubble if it exists
+      // Update existing assistant bubble if it exists, or add new one if not duplicate
       if (_messages.isNotEmpty && _messages.last['role'] == 'assistant') {
-          _messages.last['content'] = lastResponse;
+          // Only update if content is different to avoid duplicates
+          if (_messages.last['content'] != lastResponse) {
+            _messages.last['content'] = lastResponse;
+          }
       } else {
-          _addMessage('assistant', lastResponse);
+          // Check for duplicates before adding
+          final isDuplicate = _messages.any((msg) => 
+            msg['role'] == 'assistant' && msg['content'] == lastResponse
+          );
+          if (!isDuplicate) {
+            _addMessage('assistant', lastResponse);
+          }
       }
     }
   }
@@ -267,10 +406,134 @@ class WebSocketService extends ChangeNotifier {
     _addMessage('system', '[$severity] $component: $message');
   }
 
+  void _handleLogEvent(Map<String, dynamic> data) {
+    _backendLogs.add(data);
+    if (_backendLogs.length > 500) {
+      _backendLogs.removeAt(0);
+    }
+    notifyListeners();
+  }
+
+  void _handleA2UIRender(Map<String, dynamic> data) {
+    final viewJson = data['view'];
+    if (viewJson is! Map) return;
+    final view = A2UIView.fromJson(Map<String, dynamic>.from(viewJson));
+    if (view.id.isEmpty) return;
+
+    _a2uiViews.removeWhere((v) => v.id == view.id);
+    _a2uiViews.add(view);
+    _a2uiViews.sort((a, b) {
+      final priorityCmp = b.priority.compareTo(a.priority);
+      if (priorityCmp != 0) return priorityCmp;
+      final aTime = a.createdAt?.millisecondsSinceEpoch ?? 0;
+      final bTime = b.createdAt?.millisecondsSinceEpoch ?? 0;
+      return bTime.compareTo(aTime);
+    });
+  }
+
+  void _handleA2UIClear(Map<String, dynamic> data) {
+    final ids = <String>{};
+    final single = data['view_id']?.toString();
+    if (single != null && single.isNotEmpty) ids.add(single);
+    final list = data['view_ids'];
+    if (list is List) {
+      for (final item in list) {
+        final id = item?.toString() ?? '';
+        if (id.isNotEmpty) ids.add(id);
+      }
+    }
+    if (ids.isEmpty) return;
+    _a2uiViews.removeWhere((v) => ids.contains(v.id));
+  }
+
+  void _handleA2UIToast(Map<String, dynamic> data) {
+    final severity = (data['severity'] as String? ?? 'info').toUpperCase();
+    final message = data['message'] as String? ?? '';
+    if (message.isNotEmpty) {
+      _addMessage('system', '[$severity] $message');
+    }
+  }
+
+  void _handleA2UIActionResult(Map<String, dynamic> data) {
+    final success = data['success'] as bool? ?? false;
+    final message = data['message'] as String? ?? '';
+    if (message.isNotEmpty) {
+      final prefix = success ? '[A2UI OK]' : '[A2UI]';
+      _addMessage('system', '$prefix $message');
+    }
+  }
+
   void _addMessage(String role, String text, {bool isPartial = false}) {
     if (text.isEmpty) return;
     _messages.add({'role': role, 'content': text, 'isPartial': isPartial, 'timestamp': DateTime.now().toIso8601String()});
     if (_messages.length > 50) _messages.removeAt(0);
+  }
+
+  Future<void> _retryConnect() async {
+    final resolved = await _resolveEndpoint();
+    await _tryConnect(resolved.host, resolved.port);
+  }
+
+  Future<_ResolvedEndpoint> _resolveEndpoint() async {
+    var host = _targetHost;
+    var port = _targetPort ?? 8765;
+
+    if (_targetPort == null) {
+      final portFile = await _readPortFile();
+      if (portFile != null) {
+        final fileHost = portFile['host'] as String?;
+        final filePort = portFile['port'];
+        if (_targetHost == '127.0.0.1' && fileHost != null && fileHost.isNotEmpty) {
+          host = fileHost;
+        }
+        if (filePort is int) {
+          port = filePort;
+        } else if (filePort is String) {
+          final parsed = int.tryParse(filePort);
+          if (parsed != null) {
+            port = parsed;
+          }
+        }
+      }
+    }
+
+    final changed = _resolvedHost != host || _resolvedPort != port;
+    _resolvedHost = host;
+    _resolvedPort = port;
+    if (changed) {
+      notifyListeners();
+    }
+
+    return _ResolvedEndpoint(host, port);
+  }
+
+  Future<Map<String, dynamic>?> _readPortFile() async {
+    try {
+      final path = _getPortFilePath();
+      if (path == null || path.isEmpty) {
+        return null;
+      }
+      final file = File(path);
+      if (!await file.exists()) {
+        return null;
+      }
+      final content = await file.readAsString();
+      final data = jsonDecode(content);
+      if (data is Map<String, dynamic>) {
+        return data;
+      }
+    } catch (e) {
+      debugPrint('Failed to read WebSocket port file: $e');
+    }
+    return null;
+  }
+
+  String? _getPortFilePath() {
+    final home = Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'];
+    if (home == null || home.isEmpty) {
+      return null;
+    }
+    return '$home${Platform.pathSeparator}.chintu${Platform.pathSeparator}ws_port.json';
   }
   void startPushToTalk() {
     if (_isConnected && _channel != null) {
@@ -345,4 +608,11 @@ class WebSocketService extends ChangeNotifier {
         break;
     }
   }
+}
+
+class _ResolvedEndpoint {
+  final String host;
+  final int port;
+
+  const _ResolvedEndpoint(this.host, this.port);
 }

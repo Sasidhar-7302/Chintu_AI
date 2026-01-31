@@ -7,7 +7,7 @@ Welcome to **Chintu AI**! This guide covers how to start and interact with your 
 There are two ways to launch Chintu.
 
 ### Option 1: The Easy Way (Batch Script)
-Double-click `start_chintu.bat`. 
+Run `Launch-Chintu.ps1` (PowerShell). 
 *   This will launch the backend server and the Flutter UI automatically.
 
 ### Option 2: Command Line

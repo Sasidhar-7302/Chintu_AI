@@ -1,14 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
+import '../main.dart';
 import '../services/websocket_service.dart';
 import '../widgets/ai_orb.dart';
 import '../widgets/waveform_widget.dart';
 import '../widgets/glass_card.dart';
-import '../widgets/capability_panel.dart';
+import '../widgets/system_health_panel.dart';
+import '../widgets/scheduled_tasks_panel.dart';
+import '../widgets/activity_log_panel.dart';
+import '../widgets/hud_panel.dart';
 import '../widgets/code_approval_dialog.dart';
+import '../widgets/a2ui_overlay.dart';
+import '../widgets/background_grid.dart';
 import '../theme/app_theme.dart';
 import 'settings_screen.dart';
+import '../widgets/backend_log_panel.dart';
 import 'dart:async';
 
 class HomeScreen extends StatefulWidget {
@@ -20,6 +27,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   bool _isRecording = false;
+  bool _showBackendLogs = false;
   StreamSubscription? _approvalSubscription;
 
   @override
@@ -41,30 +49,36 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _showApprovalDialog(Map<String, dynamic> request) {
     if (!mounted) return;
-    
-    // Bring window to front
-    // windowManager.show(); // Assuming handled by backend 'window_control'
 
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => CodeApprovalDialog(
-        fileName: request['file'] ?? 'Unknown File',
-        diff: request['diff'] ?? 'No diff available',
-        onApprove: () {
-          context.read<WebSocketService>().sendCodeApprovalResponse(
-            request['request_id'], true
-          );
-          Navigator.of(context).pop();
-        },
-        onReject: () {
-          context.read<WebSocketService>().sendCodeApprovalResponse(
-            request['request_id'], false
-          );
-          Navigator.of(context).pop();
-        },
-      ),
-    );
+    // Give the A2UI path a moment to render; if present, skip this fallback dialog.
+    Future.delayed(const Duration(milliseconds: 150), () {
+      if (!mounted) return;
+      final ws = context.read<WebSocketService>();
+      if (ws.hasA2UIView(category: 'code_approval') || ws.hasA2UIView(kind: 'code_approval')) {
+        return;
+      }
+
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => CodeApprovalDialog(
+          fileName: request['file'] ?? 'Unknown File',
+          diff: request['diff'] ?? 'No diff available',
+          onApprove: () {
+            context.read<WebSocketService>().sendCodeApprovalResponse(
+              request['request_id'], true
+            );
+            Navigator.of(context).pop();
+          },
+          onReject: () {
+            context.read<WebSocketService>().sendCodeApprovalResponse(
+              request['request_id'], false
+            );
+            Navigator.of(context).pop();
+          },
+        ),
+      );
+    });
   }
 
   @override
@@ -78,6 +92,8 @@ class _HomeScreenState extends State<HomeScreen> {
         final capabilities = ws.capabilities;
         final transcript = ws.transcript;
         final connected = ws.isConnected;
+        final a2uiViews = ws.a2uiViews;
+        final hud = ws.hud;
         final isStandby = connected && state == 'idle';
         final displayState = !connected ? 'error' : (isStandby ? 'standby' : state);
         final showWaveform = displayState == 'listening' || displayState == 'speaking' || displayState == 'standby';
@@ -131,6 +147,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     waveformColor,
                                     audioLevel,
                                     capabilities,
+                                    hud,
                                     displayMessages,
                                   )
                                 : _buildWideLayout(
@@ -143,6 +160,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     waveformColor,
                                     audioLevel,
                                     capabilities,
+                                    hud,
                                     displayMessages,
                                   ),
                           ),
@@ -150,6 +168,17 @@ class _HomeScreenState extends State<HomeScreen> {
                       );
                     },
                   ),
+                ),
+                A2UIOverlay(
+                  views: a2uiViews,
+                  onAction: (viewId, actionId, payload, formData) async {
+                    await ws.sendA2UIAction(
+                      viewId,
+                      actionId,
+                      payload: payload,
+                      form: formData,
+                    );
+                  },
                 ),
               ],
             ),
@@ -160,22 +189,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildBackdrop() {
-    return Stack(
+    return const Stack(
       children: [
-        Positioned(
-          top: -120,
-          left: -80,
-          child: _blurredOrb(color: AppColors.accent.withValues(alpha: 0.25), size: 260),
-        ),
-        Positioned(
-          bottom: -120,
-          right: -60,
-          child: _blurredOrb(color: AppColors.accentSoft.withValues(alpha: 0.2), size: 240),
-        ),
-        Positioned(
-          top: 200,
-          right: 220,
-          child: _blurredOrb(color: AppColors.success.withValues(alpha: 0.15), size: 180),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: BackgroundGrid(spacing: 80, lineOpacity: 0.03),
+          ),
         ),
       ],
     );
@@ -207,9 +226,41 @@ class _HomeScreenState extends State<HomeScreen> {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('CHINTU', style: theme.textTheme.displayLarge),
-              const SizedBox(height: 4),
-              Text('Personal AI Assistant', style: theme.textTheme.labelLarge),
+              Row(
+                children: [
+                  Container(
+                    width: 38,
+                    height: 38,
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: AppColors.surface,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: AppColors.accent.withValues(alpha: 0.3)),
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppColors.accent.withValues(alpha: 0.1),
+                          blurRadius: 10,
+                          spreadRadius: 2,
+                        ),
+                      ],
+                    ),
+                    child: Image.asset(
+                      'assets/branding/Chintu_Mark.png',
+                      fit: BoxFit.contain,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    'CHINTU',
+                    style: theme.textTheme.headlineMedium?.copyWith(
+                      fontSize: 18,
+                      letterSpacing: 2.0,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
           const Spacer(),
@@ -217,9 +268,135 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(width: 12),
           _buildConnectionStatus(connected),
           const SizedBox(width: 12),
+          _buildWindowButton(Icons.terminal, () => NavRelay.onNavigate?.call(2)),
+          const SizedBox(width: 12),
           _buildWindowButton(Icons.settings, () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()))),
           const SizedBox(width: 8),
           _buildWindowButton(Icons.close, () async => await windowManager.close()),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLeftRail(
+    ThemeData theme,
+    List<Map<String, dynamic>> capabilities,
+    Map<String, dynamic> hud,
+  ) {
+    return Column(
+      children: [
+        Expanded(
+          flex: 4,
+          child: _buildSectionCard(
+            title: 'Systems',
+            icon: Icons.sensors,
+            child: SystemHealthPanel(capabilities: capabilities),
+            bodyPadding: EdgeInsets.zero,
+          ),
+        ),
+        const SizedBox(height: 16),
+        Expanded(
+          flex: 3,
+          child: _buildSectionCard(
+            title: 'Schedules',
+            icon: Icons.event_available,
+            child: const ScheduledTasksPanel(),
+            bodyPadding: const EdgeInsets.fromLTRB(8, 6, 8, 12),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Expanded(
+          flex: 3,
+          child: _buildSectionCard(
+            title: 'Neural HUD',
+            icon: Icons.hub,
+            child: HudPanel(hud: hud),
+            bodyPadding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRightRail(
+    ThemeData theme,
+    bool connected,
+    List<Map<String, dynamic>> displayMessages,
+  ) {
+    return Column(
+      children: [
+        Expanded(
+          flex: 6,
+          child: _buildConversationPanel(theme, connected, displayMessages),
+        ),
+        const SizedBox(height: 16),
+        Expanded(
+          flex: 4,
+          child: _buildSectionCard(
+            title: _showBackendLogs ? 'System Logs' : 'Activity',
+            icon: _showBackendLogs ? Icons.terminal : Icons.track_changes,
+            trailing: IconButton(
+              icon: Icon(
+                _showBackendLogs ? Icons.visibility : Icons.terminal,
+                size: 16,
+                color: AppColors.accent.withValues(alpha: 0.7),
+              ),
+              onPressed: () => setState(() => _showBackendLogs = !_showBackendLogs),
+              tooltip: _showBackendLogs ? 'Show activity' : 'Show terminal',
+            ),
+            child: _showBackendLogs ? const BackendLogPanel() : const ActivityLogPanel(),
+            bodyPadding: _showBackendLogs ? EdgeInsets.zero : const EdgeInsets.fromLTRB(10, 4, 10, 12),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSectionCard({
+    required String title,
+    required IconData icon,
+    required Widget child,
+    Widget? trailing,
+    EdgeInsets? bodyPadding,
+  }) {
+    return GlassCard(
+      padding: EdgeInsets.zero,
+      borderRadius: BorderRadius.circular(22),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 14, 10),
+            child: Row(
+              children: [
+                Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: AppColors.accent.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.accent.withValues(alpha: 0.25)),
+                  ),
+                  child: Icon(icon, size: 15, color: AppColors.accent),
+                ),
+                const SizedBox(width: 10),
+                Text(title, style: const TextStyle(color: AppColors.textPrimary, fontWeight: FontWeight.w600, fontSize: 15)),
+                const Spacer(),
+                if (trailing != null) trailing,
+              ],
+            ),
+          ),
+          Container(
+            height: 1,
+            color: AppColors.border.withValues(alpha: 0.6),
+            margin: const EdgeInsets.symmetric(horizontal: 16),
+          ),
+          Expanded(
+            child: Padding(
+              padding: bodyPadding ?? const EdgeInsets.fromLTRB(12, 8, 12, 12),
+              child: child,
+            ),
+          ),
         ],
       ),
     );
@@ -235,6 +412,7 @@ class _HomeScreenState extends State<HomeScreen> {
     Color waveformColor,
     double audioLevel,
     List<Map<String, dynamic>> capabilities,
+    Map<String, dynamic> hud,
     List<Map<String, dynamic>> displayMessages,
   ) {
     return Padding(
@@ -242,13 +420,17 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Row(
         children: [
           SizedBox(
-            width: 240,
-            child: CapabilityPanel(capabilities: capabilities),
+            width: 300,
+            child: _buildLeftRail(
+              theme,
+              capabilities,
+              hud,
+            ),
           ),
           const SizedBox(width: 18),
           Expanded(
             flex: 2,
-            child: _buildCenterPanel(
+            child: _buildCenterStage(
               theme,
               connected,
               displayState,
@@ -262,7 +444,11 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(width: 18),
           SizedBox(
             width: 360,
-            child: _buildConversationPanel(theme, connected, displayMessages),
+            child: _buildRightRail(
+              theme,
+              connected,
+              displayMessages,
+            ),
           ),
         ],
       ),
@@ -279,13 +465,14 @@ class _HomeScreenState extends State<HomeScreen> {
     Color waveformColor,
     double audioLevel,
     List<Map<String, dynamic>> capabilities,
+    Map<String, dynamic> hud,
     List<Map<String, dynamic>> displayMessages,
   ) {
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
       child: Column(
         children: [
-          _buildCenterPanel(
+          _buildCenterStage(
             theme,
             connected,
             displayState,
@@ -298,13 +485,44 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(height: 16),
           _buildConversationPanel(theme, connected, displayMessages),
           const SizedBox(height: 16),
-          CapabilityPanel(capabilities: capabilities),
+          _buildSectionCard(
+            title: 'Systems',
+            icon: Icons.sensors,
+            child: SystemHealthPanel(capabilities: capabilities),
+          ),
+          const SizedBox(height: 16),
+          _buildSectionCard(
+            title: 'Schedules',
+            icon: Icons.event_available,
+            child: const ScheduledTasksPanel(),
+          ),
+          const SizedBox(height: 16),
+          _buildSectionCard(
+            title: 'Neural HUD',
+            icon: Icons.hub,
+            child: HudPanel(hud: hud),
+          ),
+          const SizedBox(height: 16),
+          _buildSectionCard(
+            title: _showBackendLogs ? 'System Logs' : 'Activity',
+            icon: _showBackendLogs ? Icons.terminal : Icons.track_changes,
+            trailing: IconButton(
+              icon: Icon(
+                _showBackendLogs ? Icons.visibility : Icons.terminal,
+                size: 16,
+                color: AppColors.accent.withValues(alpha: 0.7),
+              ),
+              onPressed: () => setState(() => _showBackendLogs = !_showBackendLogs),
+            ),
+            child: _showBackendLogs ? const BackendLogPanel() : const ActivityLogPanel(),
+            bodyPadding: _showBackendLogs ? EdgeInsets.zero : const EdgeInsets.fromLTRB(10, 4, 10, 12),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildCenterPanel(
+  Widget _buildCenterStage(
     ThemeData theme,
     bool connected,
     String displayState,
@@ -315,37 +533,46 @@ class _HomeScreenState extends State<HomeScreen> {
     double audioLevel,
   ) {
     return GlassCard(
-      blur: 20,
-      opacity: 0.22,
-      borderRadius: BorderRadius.circular(24),
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 22),
+      borderRadius: BorderRadius.circular(26),
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'Assistant Core',
-              style: theme.textTheme.titleLarge,
+          Row(
+            children: [
+              const Icon(Icons.blur_on, color: AppColors.accent, size: 18),
+              const SizedBox(width: 10),
+              Text('Command Center', style: theme.textTheme.titleLarge),
+              const Spacer(),
+              _buildStatusChip(displayState, connected),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            connected ? 'System active' : 'Connecting to core...',
+            style: theme.textTheme.bodySmall?.copyWith(color: AppColors.textMuted, letterSpacing: 1.1),
+          ),
+          const SizedBox(height: 18),
+          Expanded(
+            child: Center(
+              child: showWaveform
+                  ? SizedBox(
+                      height: 240,
+                      child: WaveformWidget(
+                        audioLevel: waveformLevel,
+                        isActive: waveformActive,
+                        color: waveformColor,
+                      ),
+                    )
+                  : AIOrb(state: displayState, audioLevel: audioLevel, size: 240),
             ),
           ),
-          const SizedBox(height: 18),
-          Center(
-            child: showWaveform
-                ? SizedBox(
-                    height: 220,
-                    child: WaveformWidget(
-                      audioLevel: waveformLevel,
-                      isActive: waveformActive,
-                      color: waveformColor,
-                    ),
-                  )
-                : AIOrb(state: displayState, audioLevel: audioLevel, size: 220),
-          ),
-          const SizedBox(height: 18),
-          StateIndicator(state: displayState),
-          const SizedBox(height: 14),
+          const SizedBox(height: 16),
+          Center(child: StateIndicator(state: displayState)),
+          const SizedBox(height: 10),
           _buildHintRow(displayState, connected),
+          const SizedBox(height: 16),
+          _buildQuickActions(theme),
         ],
       ),
     );
@@ -353,48 +580,48 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildConversationPanel(ThemeData theme, bool connected, List<Map<String, dynamic>> displayMessages) {
     return GlassCard(
-      blur: 18,
-      opacity: 0.2,
-      borderRadius: BorderRadius.circular(22),
       padding: EdgeInsets.zero,
+      borderRadius: BorderRadius.circular(24),
       child: Column(
         children: [
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: AppColors.surfaceStrong.withValues(alpha: 0.6),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),
-              border: Border(
-                bottom: BorderSide(color: AppColors.border.withValues(alpha: 0.6)),
-              ),
-            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 14, 10),
             child: Row(
               children: [
                 Container(
-                  padding: const EdgeInsets.all(8),
+                  width: 28,
+                  height: 28,
                   decoration: BoxDecoration(
-                    color: AppColors.accent.withValues(alpha: 0.15),
+                    color: AppColors.accent.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.accent.withValues(alpha: 0.25)),
                   ),
-                  child: const Icon(Icons.chat_bubble_outline, color: AppColors.accent, size: 16),
+                  child: const Icon(Icons.chat_bubble_outline, color: AppColors.accent, size: 15),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 10),
                 Text('Conversation', style: theme.textTheme.titleLarge),
+                const Spacer(),
+                _buildConnectionStatus(connected),
               ],
             ),
+          ),
+          Container(
+            height: 1,
+            color: AppColors.border.withValues(alpha: 0.6),
+            margin: const EdgeInsets.symmetric(horizontal: 16),
           ),
           Expanded(
             child: displayMessages.isEmpty
                 ? Center(
                     child: Text(
-                      connected ? 'Wake word active - say "Hey Chintu"' : 'Waiting for backend...',
+                      connected ? 'Say "Hey Chintu" or type a command to begin.' : 'Waiting for backend...',
                       style: theme.textTheme.bodySmall,
                       textAlign: TextAlign.center,
                     ),
                   )
                 : ListView.builder(
                     controller: _scrollController,
-                    padding: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
                     itemCount: displayMessages.length,
                     itemBuilder: (context, index) => _buildMessageBubble(displayMessages[index]),
                   ),
@@ -407,9 +634,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildInputBar(ThemeData theme) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
       decoration: BoxDecoration(
-        color: AppColors.surfaceStrong.withValues(alpha: 0.5),
+        color: AppColors.surfaceElevated.withValues(alpha: 0.6),
         border: Border(top: BorderSide(color: AppColors.border.withValues(alpha: 0.6))),
       ),
       child: Row(
@@ -419,37 +646,65 @@ class _HomeScreenState extends State<HomeScreen> {
             onTapUp: (_) => _stopRecording(context.read<WebSocketService>()),
             onTapCancel: () => _stopRecording(context.read<WebSocketService>()),
             child: Container(
-              width: 40,
-              height: 40,
-              margin: const EdgeInsets.only(right: 8),
+              width: 44,
+              height: 44,
+              margin: const EdgeInsets.only(right: 10),
               decoration: BoxDecoration(
-                color: _isRecording ? AppColors.danger.withValues(alpha: 0.7) : AppColors.accent.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: _isRecording ? AppColors.danger : AppColors.accent.withValues(alpha: 0.4)),
+                color: _isRecording
+                    ? AppColors.accent.withValues(alpha: 0.2)
+                    : AppColors.surfaceStrong.withValues(alpha: 0.6),
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(
+                  color: _isRecording
+                      ? AppColors.accent
+                      : AppColors.border.withValues(alpha: 0.6),
+                  width: _isRecording ? 1.5 : 1.0,
+                ),
               ),
               child: Icon(
                 _isRecording ? Icons.mic : Icons.mic_none,
-                color: _isRecording ? Colors.white : AppColors.accent,
-                size: 18,
+                color: _isRecording ? AppColors.accent : AppColors.textMuted,
+                size: 20,
               ),
             ),
           ),
           Expanded(
-            child: TextField(
-              controller: _textController,
-              style: theme.textTheme.bodyMedium,
-              decoration: InputDecoration(
-                hintText: 'Type a command...',
-                hintStyle: theme.textTheme.bodySmall,
-                border: InputBorder.none,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Container(
+              height: 42,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(
+                color: AppColors.surfaceStrong.withValues(alpha: 0.6),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: AppColors.border.withValues(alpha: 0.6)),
               ),
-              onSubmitted: (text) => _sendMessage(context.read<WebSocketService>(), text),
+              child: Center(
+                child: TextField(
+                  controller: _textController,
+                  style: theme.textTheme.bodyMedium,
+                  decoration: InputDecoration(
+                    hintText: 'Type a command or ask anything...',
+                    hintStyle: theme.textTheme.bodySmall,
+                    border: InputBorder.none,
+                  ),
+                  onSubmitted: (text) => _sendMessage(context.read<WebSocketService>(), text),
+                ),
+              ),
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.send, color: AppColors.accent, size: 20),
-            onPressed: () => _sendMessage(context.read<WebSocketService>(), _textController.text),
+          const SizedBox(width: 10),
+          InkWell(
+            onTap: () => _sendMessage(context.read<WebSocketService>(), _textController.text),
+            borderRadius: BorderRadius.circular(14),
+            child: Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: AppColors.accent.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: AppColors.accent.withValues(alpha: 0.5)),
+              ),
+              child: const Icon(Icons.arrow_upward, color: AppColors.accent, size: 18),
+            ),
           ),
         ],
       ),
@@ -459,10 +714,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildStatusChip(String displayState, bool connected) {
     final Map<String, Color> colors = {
       'standby': AppColors.accent,
-      'listening': AppColors.success,
-      'processing': AppColors.warning,
+      'listening': AppColors.accentSoft,
+      'processing': AppColors.accentDeep,
       'speaking': AppColors.accentSoft,
-      'error': AppColors.danger,
+      'error': AppColors.accentDeep,
     };
     final label = switch (displayState) {
       'standby' => 'Wake word active',
@@ -516,6 +771,53 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildQuickActions(ThemeData theme) {
+    final actions = [
+      {'label': 'Daily brief', 'command': 'Give me a 2-minute daily briefing', 'icon': Icons.today},
+      {'label': 'Summarize', 'command': 'Summarize my clipboard', 'icon': Icons.article},
+      {'label': 'New task', 'command': 'Create a new task', 'icon': Icons.check_circle_outline},
+      {'label': 'Open app', 'command': 'Open Visual Studio Code', 'icon': Icons.apps},
+      {'label': 'Search web', 'command': 'Research the latest on AI productivity', 'icon': Icons.search},
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Quick Actions', style: theme.textTheme.labelLarge),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: actions.map((action) {
+            return InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => _sendMessage(context.read<WebSocketService>(), action['command'] as String),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceStrong.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: AppColors.border.withValues(alpha: 0.6)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(action['icon'] as IconData, size: 16, color: AppColors.accent),
+                    const SizedBox(width: 8),
+                    Text(
+                      action['label'] as String,
+                      style: const TextStyle(color: AppColors.textPrimary, fontSize: 12, fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
+    );
+  }
+
   void _startRecording(WebSocketService ws) {
     setState(() => _isRecording = true);
     ws.startPushToTalk();
@@ -555,10 +857,10 @@ class _HomeScreenState extends State<HomeScreen> {
           height: 8,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: connected ? AppColors.success : AppColors.danger,
+            color: connected ? AppColors.accent : AppColors.accentDeep,
             boxShadow: [
               BoxShadow(
-                color: (connected ? AppColors.success : AppColors.danger).withValues(alpha: 0.5),
+                color: (connected ? AppColors.accent : AppColors.accentDeep).withValues(alpha: 0.5),
                 blurRadius: 6,
               )
             ],
@@ -578,22 +880,22 @@ class _HomeScreenState extends State<HomeScreen> {
     final isSystem = msg['role'] == 'system';
     final isPartial = msg['isPartial'] == true;
     final bubbleColor = isUser
-        ? AppColors.accent.withValues(alpha: 0.15)
-        : (isSystem ? AppColors.danger.withValues(alpha: 0.12) : AppColors.surfaceStrong.withValues(alpha: 0.7));
+        ? AppColors.surfaceElevated
+        : (isSystem ? AppColors.danger.withValues(alpha: 0.08) : Colors.transparent);
     final borderColor = isUser
-        ? AppColors.accent.withValues(alpha: 0.5)
-        : (isSystem ? AppColors.danger.withValues(alpha: 0.45) : AppColors.border.withValues(alpha: 0.6));
+        ? AppColors.accent.withValues(alpha: 0.4)
+        : (isSystem ? AppColors.danger.withValues(alpha: 0.3) : Colors.transparent);
 
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        constraints: const BoxConstraints(maxWidth: 280),
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
         decoration: BoxDecoration(
           color: bubbleColor,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: borderColor),
+          borderRadius: BorderRadius.circular(16),
+          border: isUser || isSystem ? Border.all(color: borderColor) : null,
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,

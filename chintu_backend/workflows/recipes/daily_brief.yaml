@@ -1,0 +1,27 @@
+name: daily-brief
+description: "Daily summary: time, reminders, tasks, and news."
+args:
+  topic:
+    default: technology
+  news_query:
+    default: "latest ${topic} news"
+steps:
+  - id: date
+    command: "capability:system_info what is the date"
+  - id: time
+    command: "capability:system_info what time is it"
+  - id: reminders
+    command: "capability:list_reminders"
+  - id: tasks
+    command: "capability:task_status"
+  - id: news
+    command: "capability:news_search ${news_query}"
+  - id: brief
+    env:
+      BRIEF_DATE: "$date.stdout"
+      BRIEF_TIME: "$time.stdout"
+      BRIEF_REMINDERS: "$reminders.stdout"
+      BRIEF_TASKS: "$tasks.stdout"
+      BRIEF_NEWS: "$news.stdout"
+    command: |
+      shell:powershell -NoProfile -Command "Write-Output 'Daily Brief'; Write-Output $env:BRIEF_DATE; Write-Output $env:BRIEF_TIME; Write-Output ''; Write-Output 'Reminders:'; Write-Output $env:BRIEF_REMINDERS; Write-Output ''; Write-Output 'Tasks:'; Write-Output $env:BRIEF_TASKS; Write-Output ''; Write-Output 'News:'; Write-Output $env:BRIEF_NEWS"

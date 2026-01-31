@@ -13,7 +13,7 @@ Your Chintu system uses a **plugin-based capability registry** - making it **100
 Create a new file: `chintu/core/my_new_capability.py`
 
 ```python
-from chintu.core.capabilities import Capability, CapabilityType, ActionResult
+from chintu_backend.core.capabilities import Capability, CapabilityType, ActionResult
 from typing import Dict
 
 def handle_weather(text: str, context: Dict) -> ActionResult:
@@ -42,7 +42,7 @@ def get_weather(location: str) -> str:
 In `chintu/core/capability_handlers.py` or create new module:
 
 ```python
-from chintu.core.capabilities import get_registry, Capability, CapabilityType
+from chintu_backend.core.capabilities import get_registry, Capability, CapabilityType
 from .my_new_capability import handle_weather
 
 def register_weather_capability():

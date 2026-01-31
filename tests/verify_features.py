@@ -10,7 +10,7 @@ class TestNewFeatures(unittest.TestCase):
     
     def test_window_manager(self):
         print("\nTesting Window Manager...")
-        from chintu.platform.window_manager import get_window_manager
+        from chintu_backend.platform.window_manager import get_window_manager
         wm = get_window_manager()
         summary = wm.get_window_summary()
         self.assertIsInstance(summary, str)
@@ -19,7 +19,7 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_screen_control_import(self):
         print("\nTesting Screen Control Implementation...")
-        from chintu.automation.screen_control import get_screen_controller
+        from chintu_backend.automation.screen_control import get_screen_controller
         ctrl = get_screen_controller()
         if ctrl.enabled:
             print("  PyAutoGUI is enabled.")
@@ -32,7 +32,7 @@ class TestNewFeatures(unittest.TestCase):
 
     def test_switch_window(self):
         print("\nTesting Switch Window...")
-        from chintu.platform.window_manager import get_window_manager
+        from chintu_backend.platform.window_manager import get_window_manager
         wm = get_window_manager()
         # Try finding VS Code (likely open for user)
         res = wm.switch_to_window("code")

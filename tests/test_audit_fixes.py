@@ -7,16 +7,16 @@ from pathlib import Path
 # Add project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chintu.core.state import get_state_manager
-from chintu.core.capability_handlers import handle_open_app, handle_get_last_opened_app
-from chintu.vision.app_listing import handle_close_app
+from chintu_backend.core.state import get_state_manager
+from chintu_backend.core.capability_handlers import handle_open_app, handle_get_last_opened_app
+from chintu_backend.vision.app_listing import handle_close_app
 
 class TestStateAndApps:
     def setup_method(self):
         # Reset state
         get_state_manager()._state.last_opened_app = None
 
-    @patch('chintu.core.capability_handlers.webbrowser.open')
+    @patch('chintu_backend.core.capability_handlers.webbrowser.open')
     def test_open_url_updates_state(self, mock_browser):
         # Test "open URL" path in handle_open_app
         handle_open_app("open example.com", {})

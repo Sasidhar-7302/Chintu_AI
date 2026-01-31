@@ -13,8 +13,8 @@ import os
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from chintu.core.model_router import IntentDetector, ModelRouter, RoutingDecision
-from chintu.platform.window_manager import get_window_manager
+from chintu_backend.core.model_router import IntentDetector, ModelRouter, RoutingDecision
+from chintu_backend.platform.window_manager import get_window_manager
 
 def benchmark():
     print("=== Chintu Latency Benchmark ===\n")
@@ -55,7 +55,7 @@ def benchmark():
     print("[Core Module Load]")
     start_time = time.time()
     try:
-        from chintu.core.capability_handlers import get_registry
+        from chintu_backend.core.capability_handlers import get_registry
         get_registry()
     except Exception as e:
         print(f"  Failed to load capabilities: {e}")

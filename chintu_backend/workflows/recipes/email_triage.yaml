@@ -1,0 +1,9 @@
+name: email-triage
+description: "List recent emails using Himalaya CLI if installed."
+steps:
+  - id: inbox
+    requires_bin:
+      - himalaya
+    setup: "Install Himalaya and run `himalaya configure`. Tell me your email provider and I can guide you."
+    command: |
+      shell:powershell -NoProfile -Command "himalaya list"

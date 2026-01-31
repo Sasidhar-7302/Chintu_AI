@@ -8,12 +8,12 @@ from unittest.mock import MagicMock, patch
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from chintu.automation.scheduled_tasks import get_scheduler, Scheduler, ScheduledTask, ScheduleType
-from chintu.automation.parallel_executor import get_parallel_executor, ParallelExecutor
-from chintu.agents.task_planner import get_task_planner
-from chintu.agents.workflow_engine import get_workflow_engine
-from chintu.core.help_capabilities import handle_help
-from chintu.core.capabilities import get_registry
+from chintu_backend.automation.scheduled_tasks import get_scheduler, Scheduler, ScheduledTask, ScheduleType
+from chintu_backend.automation.parallel_executor import get_parallel_executor, ParallelExecutor
+from chintu_backend.agents.task_planner import get_task_planner
+from chintu_backend.agents.workflow_engine import get_workflow_engine
+from chintu_backend.core.help_capabilities import handle_help
+from chintu_backend.core.capabilities import get_registry
 
 class TestAutomationFixes:
     
@@ -45,7 +45,7 @@ class TestAutomationFixes:
         planner = get_task_planner()
         
         # Mock ModelRouter.get_router
-        with patch('chintu.core.model_router.get_router') as mock_get_router:
+        with patch('chintu_backend.core.model_router.get_router') as mock_get_router:
             mock_router = MagicMock()
             mock_router.route_and_execute.return_value = ('[{"action": "search", "description": "test"}]', "local")
             mock_get_router.return_value = mock_router
@@ -74,7 +74,7 @@ class TestAutomationFixes:
 
     def test_status_command_exists(self):
         """Test that status capability is registered and works."""
-        from chintu.core.help_capabilities import register_help_capabilities
+        from chintu_backend.core.help_capabilities import register_help_capabilities
         
         # Ensure registered
         register_help_capabilities()

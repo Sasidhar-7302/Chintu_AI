@@ -4,6 +4,8 @@ import 'package:window_manager/window_manager.dart';
 import 'services/websocket_service.dart';
 import 'services/logging_service.dart';
 import 'services/permission_service.dart';
+import 'screens/terminal_screen.dart';
+import 'screens/splash_screen.dart';
 import 'screens/home_screen.dart';
 import 'theme/app_theme.dart';
 
@@ -33,8 +35,29 @@ void main() async {
   runApp(const ChintuApp());
 }
 
-class ChintuApp extends StatelessWidget {
+class ChintuApp extends StatefulWidget {
   const ChintuApp({super.key});
+
+  @override
+  State<ChintuApp> createState() => _ChintuAppState();
+}
+
+class _ChintuAppState extends State<ChintuApp> {
+  int _currentIndex = 1; // Start with SplashScreen
+  bool _isInitialized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    NavRelay.onNavigate = (index) => setState(() => _currentIndex = index);
+  }
+
+  void _onInitializationComplete() {
+    setState(() {
+      _isInitialized = true;
+      _currentIndex = 0; // Go to HomeScreen
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -47,8 +70,26 @@ class ChintuApp extends StatelessWidget {
         title: 'Chintu AI Assistant',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.dark(),
-        home: const HomeScreen(),
+        home: Scaffold(
+          body: Builder(
+            builder: (context) {
+              return IndexedStack(
+                index: _currentIndex,
+                children: [
+                  const HomeScreen(),
+                  SplashScreen(onComplete: _onInitializationComplete),
+                  TerminalScreen(onBack: () => setState(() => _currentIndex = 0)),
+                ],
+              );
+            },
+          ),
+        ),
       ),
     );
   }
+}
+
+// Global navigation relay (simple approach for this project)
+class NavRelay {
+  static void Function(int)? onNavigate;
 }

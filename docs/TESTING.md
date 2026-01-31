@@ -3,10 +3,10 @@
 ## Quick Start
 ```bash
 # Start Chintu
-python run_chintu.py
+python run_chintu_backend.py
 
 # Or with Flutter UI
-python run_chintu.py --with-ui
+python run_chintu_backend.py --with-ui
 ```
 
 ---
@@ -135,7 +135,7 @@ Expected:
 ### Metrics (Debug)
 Check the Flutter UI debug panel or run:
 ```python
-from chintu.core import get_metrics
+from chintu_backend.core import get_metrics
 print(get_metrics().get_stats())
 ```
 

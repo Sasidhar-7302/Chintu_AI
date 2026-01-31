@@ -2,10 +2,10 @@ import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 
 class OrbColors {
-  static const Color idle = AppColors.accentSoft;
-  static const Color standby = AppColors.accent;
-  static const Color listening = AppColors.success;
-  static const Color processing = AppColors.warning;
+  static const Color idle = AppColors.surfaceElevated;
+  static const Color standby = AppColors.accentDeep;
+  static const Color listening = AppColors.accent;
+  static const Color processing = AppColors.accentSoft;
   static const Color speaking = AppColors.accent;
 }
 
@@ -79,13 +79,7 @@ class _AIOrbState extends State<AIOrb> with TickerProviderStateMixin {
                 ),
               ],
             ),
-            child: Center(
-              child: Icon(
-                _getIcon(),
-                color: Colors.white.withValues(alpha: 0.9),
-                size: widget.size * 0.2,
-              ),
-            ),
+            child: Container(), // Removed icons for minimalist look
           ),
         );
       },

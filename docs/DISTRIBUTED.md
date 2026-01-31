@@ -14,7 +14,7 @@ This guide covers the distributed computing, multi-device support, error reporti
 
 **Usage**:
 ```python
-from chintu.platform import get_platform
+from chintu_backend.platform import get_platform
 
 # Auto-detect platform
 detector = get_platform()
@@ -38,7 +38,7 @@ print(detector.get_status_message())
 
 **Usage**:
 ```python
-from chintu.device.registration import get_device_registry
+from chintu_backend.device.registration import get_device_registry
 
 # Auto-register current device (EASY!)
 registry = get_device_registry()
@@ -67,7 +67,7 @@ print(registry.get_status_message())
 
 **Usage**:
 ```python
-from chintu.distributed.state_sync import get_distributed_state
+from chintu_backend.distributed.state_sync import get_distributed_state
 
 # Get distributed state manager
 state_manager = get_distributed_state()
@@ -93,7 +93,7 @@ state_manager.sync_state({
 
 **Usage**:
 ```python
-from chintu.core.error_reporter import report_error, ErrorSeverity
+from chintu_backend.core.error_reporter import report_error, ErrorSeverity
 
 try:
     # Some code that might fail
@@ -119,7 +119,7 @@ except Exception as e:
 
 **Get Error Summary**:
 ```python
-from chintu.core.error_reporter import get_error_reporter
+from chintu_backend.core.error_reporter import get_error_reporter
 
 reporter = get_error_reporter()
 summary = reporter.get_error_summary()
@@ -137,7 +137,7 @@ print(f"Critical: {summary['by_severity']['critical']}")
 
 **Usage**:
 ```python
-from chintu.core.health_monitor import get_health_monitor
+from chintu_backend.core.health_monitor import get_health_monitor
 
 # Get health monitor
 monitor = get_health_monitor(check_interval=30.0)
@@ -178,7 +178,7 @@ monitor.stop_monitoring()
 
 **Usage**:
 ```python
-from chintu.core.system_integrator import get_system_integrator
+from chintu_backend.core.system_integrator import get_system_integrator
 
 # Initialize all systems (automatic graceful degradation)
 integrator = get_system_integrator()
@@ -210,7 +210,7 @@ The system integrator is automatically initialized in `main.py`:
 
 ```python
 # In ChintuAssistant.__init__()
-from chintu.core.system_integrator import get_system_integrator
+from chintu_backend.core.system_integrator import get_system_integrator
 self.system_integrator = get_system_integrator()
 init_status = self.system_integrator.initialize()
 ```
@@ -268,7 +268,7 @@ All systems use comprehensive logging:
 - **Health Logs**: Component health status changes
 
 **Log Files**:
-- Main logs: `logs/chintu.log`
+- Main logs: `logs/chintu_backend.log`
 - Structured logs: `logs/chintu_structured.jsonl` (if enabled)
 - Error logs: Included in main logs with full tracebacks
 
