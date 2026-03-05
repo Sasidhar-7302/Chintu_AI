@@ -51,12 +51,19 @@ class RateLimitBudgetManager:
     Manages API budgets and auto-switches to cheaper/local options.
 
     Free tier limits are conservative to avoid hitting actual limits:
+    - NVIDIA: conservative default until tuned
     - Groq: ~30 req/min, ~1000 req/day on free tier
     - Gemini: ~15 req/min, ~1500 req/day on free tier
     - Local: Unlimited but slow
     """
 
     DEFAULT_LIMITS: Dict[str, ProviderLimits] = {
+        "nvidia": ProviderLimits(
+            requests_per_minute=40,
+            requests_per_day=2000,
+            tokens_per_minute=0,
+            tokens_per_day=0,
+        ),
         "groq": ProviderLimits(
             requests_per_minute=25,
             requests_per_day=800,
@@ -76,6 +83,12 @@ class RateLimitBudgetManager:
             tokens_per_day=0,
         ),
         "local": ProviderLimits(
+            requests_per_minute=999,
+            requests_per_day=99999,
+            tokens_per_minute=0,
+            tokens_per_day=0,
+        ),
+        "ollama": ProviderLimits(
             requests_per_minute=999,
             requests_per_day=99999,
             tokens_per_minute=0,
@@ -103,6 +116,7 @@ class RateLimitBudgetManager:
         self._cache: Dict[str, CachedResponse] = {}
         self._lock = threading.Lock()
         self._cooldowns: Dict[str, float] = {}
+        self._provider_hints: Dict[str, Dict[str, str]] = {}
 
         logger.info("RateLimitBudgetManager initialized with providers: %s", list(self._limits.keys()))
 
@@ -194,22 +208,32 @@ class RateLimitBudgetManager:
         logger.warning("Set %s minute cooldown for %s", duration, provider)
 
     def get_best_provider(self, prefer_cloud: bool = True, require_fast: bool = False) -> str:
+        try:
+            from chintu_backend.core.config import get_config
+            config = get_config()
+            cloud_priority = getattr(config, "routing_cloud_priority", ["nvidia", "groq", "gemini", "deepseek"])
+        except Exception:
+            cloud_priority = ["nvidia", "groq", "gemini", "deepseek"]
+
+        local_aliases = ["local", "ollama"]
         if prefer_cloud:
-            priority = ["groq", "gemini", "deepseek", "local"]
+            priority = list(cloud_priority) + local_aliases
         else:
-            priority = ["local", "groq", "gemini", "deepseek"]
+            priority = local_aliases + list(cloud_priority)
 
         for provider in priority:
-            if require_fast and provider == "local":
+            if require_fast and provider in {"local", "ollama"}:
                 continue
             if self.can_use(provider):
-                return provider
+                return "local" if provider == "ollama" else provider
 
         if self.can_use("local"):
             return "local"
 
-        logger.warning("All providers at capacity, defaulting to groq")
-        return "groq"
+        # Last-resort deterministic fallback for routing; downstream caller can still
+        # decide whether local runtime is actually available.
+        logger.warning("All providers at capacity, forcing local fallback route")
+        return "local"
 
     def get_usage_remaining(self, provider: str) -> Dict:
         if provider not in self._limits:
@@ -294,7 +318,13 @@ class RateLimitBudgetManager:
             "providers": {},
             "cache": self.get_cache_stats(),
             "daily_reset_in_seconds": max(0, int(self._daily_reset_time - time.time())),
+            "provider_hints": self._provider_hints.copy(),
         }
+        try:
+            from chintu_backend.core.config import get_config
+            stats["credits"] = getattr(get_config(), "provider_credits", {}) or {}
+        except Exception:
+            stats["credits"] = {}
 
         for provider in self._limits:
             minute_requests, minute_tokens = self._get_minute_usage(provider)
@@ -313,6 +343,14 @@ class RateLimitBudgetManager:
             }
 
         return stats
+
+    def update_provider_hints(self, provider: str, hints: Dict[str, str]):
+        if not provider or not hints:
+            return
+        with self._lock:
+            current = self._provider_hints.get(provider, {})
+            current.update({k: str(v) for k, v in hints.items() if v is not None})
+            self._provider_hints[provider] = current
 
 
 _budget_manager: Optional[RateLimitBudgetManager] = None

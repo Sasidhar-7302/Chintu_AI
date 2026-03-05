@@ -1,10 +1,16 @@
 """
-ThinkingManager: Implements System 2 "Thinking Mode" for complex tasks.
-Inspired by Chain-of-Thought and Agentic Reasoning patterns.
+Thinking manager for deliberate multi-step reasoning.
+
+This module provides a bounded "think -> verify -> refine" loop that can be
+used when a task needs deeper reasoning than the default fast path.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Dict, Any, Optional, List
+import re
+from typing import Optional
+
 try:
     from ..core.config import get_config
 except ImportError:
@@ -12,148 +18,143 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
 class ThinkingManager:
-    """
-    Manages the 'Deep Thinking' process for complex queries.
-    Uses an internal LLM loop to plan, critique, and refine answers.
-    """
-    
+    """Runs a bounded deep-thinking loop with optional sandbox verification."""
+
     def __init__(self, llm_client):
         self.llm = llm_client
         self.config = get_config()
-        
-        # Connect to Sandbox
+        self.sandbox = None
         try:
             from ..coding.sandbox import get_sandbox_manager
+
             self.sandbox = get_sandbox_manager()
         except ImportError:
-            self.sandbox = None
-            logger.warning("Sandbox not available for Thinking Manager")
-        
+            logger.warning("Sandbox not available for ThinkingManager")
+
     def think(self, user_query: str, system_context: str = "") -> str:
-        """
-        Execute the System 2 Thinking Loop.
-        
-        Steps:
-        1. Contextualize: Understand the core request.
-        2. Plan: Breakdown the steps.
-        3. Reason: Talk through the logic (CoT).
-        4. Synthesize: Create the final answer.
-        """
-        logger.info(f"🤔 System 2 Activated for: {user_query[:50]}...")
-        
-        # 1. The Thinking Prompt
-        # We force the LLM to output its internal monologue inside <thought> tags
-        # and the final answer inside <answer> tags.
-        thinking_prompt = f"""
-        You are an Advanced AI Agent in 'Deep Thinking Mode'.
-        
-        Your Goal: Solve the user's complex request by thinking step-by-step.
-        
-        SYSTEM CONTEXT:
-        {system_context}
-        
-        USER REQUEST:
-        {user_query}
-        
-        INSTRUCTIONS:
-        1. First, analyze the request inside <thought> tags. Break it down. Anticipate edge cases. Check your knowledge.
-        2. If you need to plan code, write the plan inside <thought>.
-        3. Finally, provide the refined, high-quality response inside <answer> tags. Only the <answer> part will be shown to the user immediately, but your thoughts help you get there.
-        
-        Format:
-        <thought>
-        [Your internal reasoning]
-        
-        To verify code, use:
-        <verify language="python">
-        print("Hello from Sandbox")
-        </verify>
-        </thought>
-        
-        <answer>
-        [Your final response]
-        </answer>
-        """
-        
-        # 2. Execute Prediction loop (Thinking -> Verifying -> Thinking)
-        MAX_ITERATIONS = 3
-        current_prompt = thinking_prompt
-        
-        for i in range(MAX_ITERATIONS):
-            response = self.llm.generate_content(current_prompt)
-            
-            # Check for verification requests
-            verified_response, needs_fix, verification_log = self._process_verification(response)
-            
+        """Execute the deep-thinking loop and return the final user response."""
+        logger.info("System-2 thinking activated for query: %s", user_query[:80])
+
+        prompt = self._build_thinking_prompt(user_query=user_query, system_context=system_context)
+        response = ""
+        max_iterations = 3
+
+        for iteration in range(max_iterations):
+            raw = self.llm.generate_content(prompt)
+            response = str(raw or "").strip()
+            if not response:
+                logger.warning("Thinking mode received empty response (iteration=%d)", iteration + 1)
+                break
+
+            verified_text, needs_fix, verification_log = self._process_verification(response)
             if not needs_fix:
-                return self._parse_thought_output(verified_response)
-                
-            # If verification failed, feed it back to the model
-            logger.info(f"🔧 Verification failed (Attempt {i+1}). Retrying...")
-            current_prompt += f"\n\nSYSTEM: Verification Output:\n{verification_log}\n\nPlease fix the code based on the error and provide the final answer."
-            
-        # If we ran out of iterations, just return what we have (best effort)
-        return self._parse_thought_output(response)
+                return self._parse_thought_output(verified_text)
+
+            logger.info("Verification failed during deep-thinking (attempt=%d)", iteration + 1)
+            prompt += (
+                "\n\nSYSTEM: Verification Output:\n"
+                f"{verification_log}\n\n"
+                "Please fix the code based on the error and provide the final answer."
+            )
+
+        if response:
+            return self._parse_thought_output(response)
+        return "I could not complete deep reasoning right now. I will continue with standard routing."
+
+    @staticmethod
+    def _build_thinking_prompt(*, user_query: str, system_context: str) -> str:
+        return f"""
+You are an AI assistant in Deep Thinking Mode.
+
+Goal: solve the user's request with explicit reasoning and a high-quality final answer.
+
+SYSTEM CONTEXT:
+{system_context}
+
+USER REQUEST:
+{user_query}
+
+INSTRUCTIONS:
+1. Analyze the request inside <thought> tags (step-by-step reasoning, edge cases).
+2. If code needs validation, include checks inside <verify language="python"> ... </verify>.
+3. Provide the final polished response inside <answer> tags.
+
+Format:
+<thought>
+[internal reasoning]
+
+<verify language="python">
+print("verification")
+</verify>
+</thought>
+
+<answer>
+[final response shown to user]
+</answer>
+""".strip()
 
     def _parse_thought_output(self, raw_text: str) -> str:
-        """Extract valid answer from the raw XML-like output."""
-        import re
-        
-        # Try to extract <answer> content
+        """Extract <answer> content; fallback to cleaned raw text."""
+        raw_text = str(raw_text or "")
+
         answer_match = re.search(r"<answer>(.*?)</answer>", raw_text, re.DOTALL | re.IGNORECASE)
         thought_match = re.search(r"<thought>(.*?)</thought>", raw_text, re.DOTALL | re.IGNORECASE)
-        
+
         if answer_match:
             final_answer = answer_match.group(1).strip()
-            
-            # Optionally log thoughts for transparency/debugging
             if thought_match:
-                thoughts = thought_match.group(1).strip()
-                logger.debug(f"💭 Thoughts:\n{thoughts}")
-                
+                logger.debug("Thinking trace: %s", thought_match.group(1).strip())
             return final_answer
-        
-        # Fallback: If model didn't use tags properly, return whole text
-        # (This happens with smaller models sometimes)
-        logger.warning("Thinking Mode: XML tags not found/malformed. Returning raw output.")
-        return raw_text.replace("<thought>", "").replace("</thought>", "").replace("<answer>", "").replace("</answer>", "").strip()
+
+        logger.warning("Thinking mode output tags missing/malformed; returning cleaned raw output.")
+        return (
+            raw_text.replace("<thought>", "")
+            .replace("</thought>", "")
+            .replace("<answer>", "")
+            .replace("</answer>", "")
+            .strip()
+        )
 
     def _process_verification(self, text: str) -> tuple[str, bool, str]:
         """
-        Scan text for <verify> tags, execute code, and return (text, needs_fix, log).
+        Run inline python verification blocks.
+
+        Returns:
+            (original_text, needs_fix, verification_log)
         """
-        import re
-        
+        text = str(text or "")
         if not self.sandbox:
             return text, False, ""
-            
-        # Simple regex for python verification
-        # <verify language="python">...</verify>
+
         pattern = r'<verify language="python">(.*?)</verify>'
         matches = re.finditer(pattern, text, re.DOTALL | re.IGNORECASE)
-        
+
         needs_fix = False
         logs = []
-        
         for match in matches:
             code = match.group(1).strip()
             stdout, stderr, exit_code = self.sandbox.run_python(code)
-            
-            log = f"Code Execution Result:\nStdout: {stdout}\nStderr: {stderr}\nExit Code: {exit_code}"
-            logs.append(log)
-            logger.info(f"Sandbox Exec: Exit {exit_code}")
-            
+            logs.append(
+                "Code Execution Result:\n"
+                f"Stdout: {stdout}\n"
+                f"Stderr: {stderr}\n"
+                f"Exit Code: {exit_code}"
+            )
+            logger.info("Thinking sandbox execution completed (exit_code=%s)", exit_code)
             if exit_code != 0:
                 needs_fix = True
-                
+
         return text, needs_fix, "\n".join(logs)
 
-# Factory
-_thinker = None
+
+_thinker: Optional[ThinkingManager] = None
+
 
 def get_thinking_manager(llm_client) -> ThinkingManager:
     global _thinker
-    if not _thinker:
+    if _thinker is None:
         _thinker = ThinkingManager(llm_client)
     return _thinker
+

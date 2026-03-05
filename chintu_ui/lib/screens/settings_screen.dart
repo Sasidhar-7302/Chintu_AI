@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../services/websocket_service.dart';
-import '../services/permission_service.dart';
+
 import '../services/logging_service.dart';
+import '../services/permission_service.dart';
+import '../services/stealth_window_service.dart';
+import '../services/websocket_service.dart';
 import '../theme/app_theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -13,23 +15,43 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  String _serverHost = '127.0.0.1';
-  int? _serverPort;
-  String _ollamaModel = 'tinyllama';
+  final TextEditingController _serverHostController = TextEditingController(
+    text: '127.0.0.1',
+  );
+  final TextEditingController _serverPortController = TextEditingController();
+  final TextEditingController _ollamaModelController = TextEditingController(
+    text: 'tinyllama',
+  );
+
+  bool _stealthMode = true;
+  bool _stealthSupported = false;
+  bool _stealthBusy = false;
 
   @override
   void initState() {
     super.initState();
-    logger.log('SettingsScreen', 'Opened settings screen');
+    logger.log('SettingsScreen', 'Opened settings');
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<WebSocketService>().requestWakeWordStatus();
+    });
+    StealthWindowService.isSupported().then((supported) {
+      if (!mounted) return;
+      setState(() => _stealthSupported = supported);
     });
   }
 
   @override
+  void dispose() {
+    _serverHostController.dispose();
+    _serverPortController.dispose();
+    _ollamaModelController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Consumer<PermissionService>(
-      builder: (context, permService, child) {
+    return Consumer2<WebSocketService, PermissionService>(
+      builder: (context, ws, perms, child) {
         return Scaffold(
           body: Container(
             decoration: const BoxDecoration(gradient: AppTheme.appBackground),
@@ -39,188 +61,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _buildHeader(),
                   Expanded(
                     child: ListView(
-                      padding: const EdgeInsets.all(16),
+                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 18),
                       children: [
-                        _buildSection('Permissions', [
-                          _buildPermissionTile(
-                            'Microphone',
-                            permService.microphoneGranted ? 'Granted' : 'Required for voice commands',
-                            Icons.mic,
-                            permService.microphoneGranted,
-                            () => _requestMicPermission(permService),
-                          ),
-                          _buildPermissionTile(
-                            'Camera',
-                            permService.cameraGranted ? 'Granted' : 'Required for hand gestures',
-                            Icons.videocam,
-                            permService.cameraGranted,
-                            () => _requestCameraPermission(permService),
-                          ),
-                        ]),
-                        const SizedBox(height: 24),
-                        _buildSection('Server Connection', [
-                          _buildTextField(
-                            'Server Host',
-                            _serverHost,
-                            (v) => setState(() => _serverHost = v),
-                          ),
-                          _buildTextField(
-                            'Server Port',
-                            _serverPort?.toString() ?? '',
-                            (v) {
-                              final trimmed = v.trim();
-                              setState(() => _serverPort = trimmed.isEmpty ? null : int.tryParse(trimmed));
-                            },
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Leave port blank to auto-detect the active WebSocket port.',
-                            style: TextStyle(color: AppColors.textMuted, fontSize: 12),
-                          ),
-                          const SizedBox(height: 6),
-                          Consumer<WebSocketService>(
-                            builder: (context, ws, child) {
-                              final mode = ws.usingAutoPort ? 'Auto' : 'Manual';
-                              return Text(
-                                '$mode endpoint: ${ws.resolvedHost}:${ws.resolvedPort}',
-                                style: TextStyle(color: AppColors.textMuted, fontSize: 12),
-                              );
-                            },
-                          ),
-                          const SizedBox(height: 16),
-                          ElevatedButton.icon(
-                            onPressed: _reconnect,
-                            icon: const Icon(Icons.refresh),
-                            label: const Text('Reconnect'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: AppColors.accent,
-                              foregroundColor: Colors.white,
-                              iconColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
-                            ),
-                          ),
-                        ]),
-                        const SizedBox(height: 24),
-                        _buildSection('LLM Settings', [
-                          _buildTextField(
-                            'Ollama Model',
-                            _ollamaModel,
-                            (v) => setState(() => _ollamaModel = v),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Available: tinyllama, llama3.2, mistral, codellama, etc.',
-                            style: TextStyle(color: AppColors.textMuted, fontSize: 12),
-                          ),
-                        ]),
-                        const SizedBox(height: 24),
-                        _buildSection('Wake Word Training', [
-                          Text(
-                            'Record 5 clear samples of "hey chintu". Tap each number to record.',
-                            style: TextStyle(color: AppColors.textMuted, fontSize: 12),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            'When you tap Train, Chintu will also record short background samples. Stay quiet for a few seconds.',
-                            style: TextStyle(color: AppColors.textMuted, fontSize: 11),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            'Tips: same mic distance, normal voice, quiet room, pause 0.5s before and after.',
-                            style: TextStyle(color: AppColors.textMuted, fontSize: 11),
-                          ),
+                        _buildAccessCard(perms),
+                        const SizedBox(height: 12),
+                        _buildConnectionCard(ws),
+                        const SizedBox(height: 12),
+                        _buildModelCard(),
+                        const SizedBox(height: 12),
+                        _buildWakeWordCard(ws),
+                        if (_stealthSupported) ...[
                           const SizedBox(height: 12),
-                          Consumer<WebSocketService>(
-                            builder: (context, ws, child) {
-                              return Column(
-                                children: [
-                                  Wrap(
-                                    spacing: 8,
-                                    runSpacing: 8,
-                                    children: List.generate(ws.wakeWordSampleCount, (index) {
-                                      final sampleIndex = index + 1;
-                                      final recorded = index < ws.wakeWordSamples.length
-                                          ? ws.wakeWordSamples[index]
-                                          : false;
-                                      final isRecording = ws.wakeWordRecordingIndex == sampleIndex;
-                                      return _buildSampleChip(
-                                        sampleIndex,
-                                        recorded,
-                                        isRecording,
-                                        () => ws.recordWakeWordSample(sampleIndex),
-                                      );
-                                    }),
-                                  ),
-                                  const SizedBox(height: 16),
-                                  Row(
-                                    children: [
-                                      Expanded(
-                                        child: ElevatedButton.icon(
-                                          onPressed: ws.requestWakeWordStatus,
-                                          icon: const Icon(Icons.sync),
-                                          label: const Text('Refresh'),
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor: AppColors.surfaceStrong,
-                                            foregroundColor: Colors.white,
-                                            iconColor: Colors.white,
-                                            padding: const EdgeInsets.symmetric(vertical: 12),
-                                          ),
-                                        ),
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Expanded(
-                                        child: ElevatedButton.icon(
-                                          onPressed: (ws.wakeWordSamples.length ==
-                                                      ws.wakeWordSampleCount &&
-                                                  ws.wakeWordSamples.every((s) => s))
-                                              ? ws.trainWakeWord
-                                              : null,
-                                          icon: const Icon(Icons.fitness_center),
-                                          label: const Text('Train Wake Word'),
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor: AppColors.accent,
-                                            foregroundColor: Colors.white,
-                                            iconColor: Colors.white,
-                                            padding: const EdgeInsets.symmetric(vertical: 12),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  if (ws.wakeWordTrainingStatus.isNotEmpty) ...[
-                                    const SizedBox(height: 12),
-                                    Text(
-                                      ws.wakeWordTrainingMessage.isNotEmpty
-                                          ? ws.wakeWordTrainingMessage
-                                          : ws.wakeWordTrainingStatus,
-                                      style: TextStyle(color: AppColors.textMuted, fontSize: 12),
-                                    ),
-                                  ],
-                                ],
-                              );
-                            },
-                          ),
-                        ]),
-                        const SizedBox(height: 24),
-                        _buildSection('About', [
-                          ListTile(
-                            title: const Text('Chintu AI Assistant', style: TextStyle(color: Colors.white)),
-                            subtitle: Text('Version 1.0.0', style: TextStyle(color: AppColors.textMuted)),
-                            leading: Container(
-                              width: 48,
-                              height: 48,
-                              decoration: BoxDecoration(
-                                color: AppColors.surfaceStrong.withValues(alpha: 0.7),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: AppColors.border.withValues(alpha: 0.8)),
-                              ),
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(10),
-                                child: Image.asset('assets/branding/Chintu_Mark.png', fit: BoxFit.contain),
-                              ),
-                            ),
-                          ),
-                        ]),
+                          _buildPrivacyCard(),
+                        ],
+                        const SizedBox(height: 12),
+                        _buildAboutCard(),
                       ],
                     ),
                   ),
@@ -235,56 +90,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _buildHeader() {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.fromLTRB(10, 8, 12, 8),
       child: Row(
         children: [
           IconButton(
             onPressed: () => Navigator.pop(context),
-            icon: const Icon(Icons.arrow_back, color: AppColors.textPrimary),
+            icon: const Icon(
+              Icons.arrow_back_rounded,
+              color: AppColors.textPrimary,
+            ),
           ),
           const SizedBox(width: 4),
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: AppColors.surfaceStrong.withValues(alpha: 0.7),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: AppColors.border.withValues(alpha: 0.8)),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: Image.asset('assets/branding/Chintu_Mark.png', fit: BoxFit.contain),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Text(
+          const Text(
             'Settings',
-            style: const TextStyle(
+            style: TextStyle(
               color: AppColors.textPrimary,
               fontSize: 22,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.4,
+              fontWeight: FontWeight.w700,
             ),
           ),
           const Spacer(),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.border.withValues(alpha: 0.35)),
-              boxShadow: [
-                BoxShadow(
-                  color: AppColors.accentDeep.withValues(alpha: 0.16),
-                  blurRadius: 12,
-                  offset: const Offset(0, 6),
-                ),
-              ],
+              color: AppColors.surfaceStrong,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.border),
             ),
-            child: Image.asset(
-              'assets/branding/Chintu_Wordmark.png',
-              height: 18,
-              fit: BoxFit.contain,
+            child: const Text(
+              'System Controls',
+              style: TextStyle(
+                color: AppColors.textMuted,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
         ],
@@ -292,108 +131,413 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  Widget _buildSection(String title, List<Widget> children) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          title,
-          style: const TextStyle(
-            color: AppColors.accent,
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
+  Widget _buildAccessCard(PermissionService perms) {
+    return _settingsCard(
+      title: 'Access',
+      subtitle: 'Required permissions for voice and camera capabilities.',
+      child: Column(
+        children: [
+          _permissionRow(
+            icon: Icons.mic_none_rounded,
+            title: 'Microphone',
+            status: perms.microphoneGranted ? 'Granted' : 'Not granted',
+            active: perms.microphoneGranted,
+            onTap: () => _requestMicPermission(perms),
           ),
-        ),
-        const SizedBox(height: 12),
-        Container(
-          decoration: BoxDecoration(
-            color: AppColors.surface.withValues(alpha: 0.85),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: AppColors.border.withValues(alpha: 0.7)),
-            boxShadow: [
-              BoxShadow(
-                color: AppColors.accentDeep.withValues(alpha: 0.18),
-                blurRadius: 20,
-                offset: const Offset(0, 10),
-              ),
-            ],
+          const SizedBox(height: 8),
+          _permissionRow(
+            icon: Icons.videocam_outlined,
+            title: 'Camera',
+            status: perms.cameraGranted ? 'Granted' : 'Not granted',
+            active: perms.cameraGranted,
+            onTap: () => _requestCameraPermission(perms),
           ),
-          padding: const EdgeInsets.all(16),
-          child: Column(children: children),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
-  Widget _buildPermissionTile(String title, String subtitle, IconData icon, bool enabled, VoidCallback onTap) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final isCompact = constraints.maxWidth < 360;
-            final iconWidget = Icon(icon, color: enabled ? AppColors.success : AppColors.textMuted);
-            final switchWidget = Switch(
-              value: enabled,
-              onChanged: (_) => onTap(),
-              activeTrackColor: AppColors.accent,
-              activeThumbColor: Colors.white,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            );
+  Widget _buildConnectionCard(WebSocketService ws) {
+    if (ws.resolvedHost.isNotEmpty &&
+        _serverHostController.text.trim() != ws.resolvedHost) {
+      _serverHostController.text = ws.resolvedHost;
+    }
+    if (!ws.usingAutoPort &&
+        _serverPortController.text.trim() != ws.resolvedPort.toString()) {
+      _serverPortController.text = ws.resolvedPort.toString();
+    }
 
-            if (isCompact) {
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      iconWidget,
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(title, style: const TextStyle(color: Colors.white)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Text(subtitle, style: TextStyle(color: AppColors.textMuted)),
-                  const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: switchWidget,
-                  ),
-                ],
+    return _settingsCard(
+      title: 'Gateway',
+      subtitle:
+          'Configure backend endpoint. Leave port empty for auto-discovery.',
+      child: Column(
+        children: [
+          TextField(
+            controller: _serverHostController,
+            decoration: const InputDecoration(
+              labelText: 'Host',
+              hintText: '127.0.0.1',
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _serverPortController,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              labelText: 'Port (optional)',
+              hintText: 'Auto',
+            ),
+          ),
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceElevated,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Text(
+              '${ws.usingAutoPort ? "Auto" : "Manual"} endpoint: ${ws.resolvedHost}:${ws.resolvedPort}',
+              style: const TextStyle(
+                color: AppColors.textMuted,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: ElevatedButton.icon(
+              onPressed: _reconnect,
+              icon: const Icon(Icons.refresh_rounded),
+              label: const Text('Reconnect'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildModelCard() {
+    return _settingsCard(
+      title: 'Model Defaults',
+      subtitle:
+          'Used when explicit model routing is not provided by a task contract.',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _ollamaModelController,
+            decoration: const InputDecoration(
+              labelText: 'Local Ollama model',
+              hintText: 'tinyllama / qwen2.5:3b / llama3.1:8b',
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Tip: keep a lightweight local model for routine prompts and reserve larger models for complex reasoning.',
+            style: TextStyle(color: AppColors.textMuted, fontSize: 11.5),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildWakeWordCard(WebSocketService ws) {
+    return _settingsCard(
+      title: 'Wake Word',
+      subtitle: 'Record 5 samples of "hey chintu" and train detection.',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: List.generate(ws.wakeWordSampleCount, (index) {
+              final sampleIndex = index + 1;
+              final recorded = index < ws.wakeWordSamples.length
+                  ? ws.wakeWordSamples[index]
+                  : false;
+              final isRecording = ws.wakeWordRecordingIndex == sampleIndex;
+              return _sampleChip(
+                index: sampleIndex,
+                recorded: recorded,
+                recording: isRecording,
+                onTap: () => ws.recordWakeWordSample(sampleIndex),
               );
-            }
+            }),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: ws.requestWakeWordStatus,
+                  icon: const Icon(Icons.sync_rounded, size: 18),
+                  label: const Text('Refresh'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed:
+                      (ws.wakeWordSamples.length == ws.wakeWordSampleCount &&
+                          ws.wakeWordSamples.every((s) => s))
+                      ? ws.trainWakeWord
+                      : null,
+                  icon: const Icon(Icons.fitness_center_rounded, size: 18),
+                  label: const Text('Train'),
+                ),
+              ),
+            ],
+          ),
+          if (ws.wakeWordTrainingStatus.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              ws.wakeWordTrainingMessage.isNotEmpty
+                  ? ws.wakeWordTrainingMessage
+                  : ws.wakeWordTrainingStatus,
+              style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
-            return Row(
+  Widget _buildPrivacyCard() {
+    return _settingsCard(
+      title: 'Privacy',
+      subtitle:
+          'Stealth mode hides the app in most desktop-capture flows on Windows.',
+      child: Row(
+        children: [
+          const Expanded(
+            child: Text(
+              'Stealth Mode',
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Switch(
+            value: _stealthMode,
+            onChanged: _stealthBusy ? null : _setStealthMode,
+            activeTrackColor: AppColors.accent.withValues(alpha: 0.45),
+            activeThumbColor: AppColors.accent,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAboutCard() {
+    return _settingsCard(
+      title: 'About',
+      subtitle: 'Current app profile and branding.',
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: AppColors.surfaceElevated,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.asset(
+                'assets/branding/ChintuLogo.png',
+                fit: BoxFit.contain,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          const Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Chintu AI Assistant',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              SizedBox(height: 3),
+              Text(
+                'Version 1.0.0',
+                style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _settingsCard({
+    required String title,
+    required String subtitle,
+    required Widget child,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.surface.withValues(alpha: 0.94),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.border),
+      ),
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: const TextStyle(color: AppColors.textMuted, fontSize: 12),
+          ),
+          const SizedBox(height: 12),
+          child,
+        ],
+      ),
+    );
+  }
+
+  Widget _permissionRow({
+    required IconData icon,
+    required String title,
+    required String status,
+    required bool active,
+    required VoidCallback onTap,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceStrong,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: active
+              ? AppColors.accent.withValues(alpha: 0.45)
+              : AppColors.borderStrong,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            icon,
+            color: active ? AppColors.accent : AppColors.textMuted,
+            size: 20,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                iconWidget,
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(title, style: const TextStyle(color: Colors.white)),
-                      const SizedBox(height: 2),
-                      Text(subtitle, style: TextStyle(color: AppColors.textMuted)),
-                    ],
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-                switchWidget,
+                const SizedBox(height: 2),
+                Text(
+                  status,
+                  style: TextStyle(
+                    color: active ? AppColors.accentSoft : AppColors.textMuted,
+                    fontSize: 11.5,
+                  ),
+                ),
               ],
-            );
-          },
+            ),
+          ),
+          OutlinedButton(
+            onPressed: onTap,
+            child: Text(active ? 'Review' : 'Enable'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sampleChip({
+    required int index,
+    required bool recorded,
+    required bool recording,
+    required VoidCallback onTap,
+  }) {
+    return SizedBox(
+      width: 118,
+      child: OutlinedButton(
+        onPressed: recording ? null : onTap,
+        style: OutlinedButton.styleFrom(
+          backgroundColor: recorded
+              ? AppColors.accent.withValues(alpha: 0.12)
+              : null,
+          side: BorderSide(
+            color: recorded
+                ? AppColors.accent.withValues(alpha: 0.6)
+                : AppColors.borderStrong,
+          ),
+        ),
+        child: Column(
+          children: [
+            Text(
+              recording ? 'Recording' : 'Sample $index',
+              style: const TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              recording ? '...' : (recorded ? 'Recorded' : 'Tap to record'),
+              style: TextStyle(
+                color: recorded ? AppColors.accentSoft : AppColors.textMuted,
+                fontSize: 10.5,
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 
+  Future<void> _setStealthMode(bool enabled) async {
+    setState(() => _stealthBusy = true);
+    final ok = await StealthWindowService.setStealthMode(enabled);
+    if (!mounted) return;
+    setState(() => _stealthBusy = false);
+    if (!ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Stealth mode not supported on this system.'),
+        ),
+      );
+      return;
+    }
+    setState(() => _stealthMode = enabled);
+  }
+
   Future<void> _requestMicPermission(PermissionService permService) async {
     logger.log('SettingsScreen', 'Requesting microphone permission');
     final granted = await permService.requestMicrophone();
-
     if (!granted && mounted) {
       _showPermissionHelp('Microphone', 'microphone', permService);
     }
@@ -402,117 +546,62 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _requestCameraPermission(PermissionService permService) async {
     logger.log('SettingsScreen', 'Requesting camera permission');
     final granted = await permService.requestCamera();
-
     if (!granted && mounted) {
       _showPermissionHelp('Camera', 'camera', permService);
     }
   }
 
-  void _showPermissionHelp(String name, String type, PermissionService permService) {
-    showDialog(
+  void _showPermissionHelp(
+    String name,
+    String type,
+    PermissionService permService,
+  ) {
+    showDialog<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        title: Text('Enable $name', style: const TextStyle(color: Colors.white)),
-        content: Text(
-          '''Permission was denied. To enable $type:
-
-1. Open Windows Settings
-2. Go to Privacy & Security > $name
-3. Enable "Let desktop apps access your $type"
-
-Or click "Open Settings" below.''',
-          style: const TextStyle(color: Colors.white70),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel', style: TextStyle(color: AppColors.textMuted)),
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: AppColors.surface,
+          title: Text(
+            'Enable $name',
+            style: const TextStyle(color: AppColors.textPrimary),
           ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              permService.openSettings();
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.accent,
-              foregroundColor: Colors.white,
+          content: Text(
+            'Permission is blocked.\n\n'
+            '1) Open Windows Settings\n'
+            '2) Go to Privacy & Security > $name\n'
+            '3) Enable desktop app access for $type',
+            style: const TextStyle(color: AppColors.textMuted),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
             ),
-            child: const Text('Open Settings', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                permService.openSettings();
+              },
+              child: const Text('Open Settings'),
+            ),
+          ],
+        );
+      },
     );
   }
 
   void _reconnect() {
     final ws = context.read<WebSocketService>();
-    ws.connect(host: _serverHost, port: _serverPort);
-    final portLabel = _serverPort == null ? 'auto' : _serverPort.toString();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Reconnecting to $_serverHost:$portLabel...'),
-        backgroundColor: AppColors.accent,
-      ),
-    );
-  }
+    final host = _serverHostController.text.trim().isEmpty
+        ? '127.0.0.1'
+        : _serverHostController.text.trim();
+    final portText = _serverPortController.text.trim();
+    final port = portText.isEmpty ? null : int.tryParse(portText);
 
-  Widget _buildTextField(String label, String value, Function(String) onChanged) {
-    return TextField(
-      controller: TextEditingController(text: value),
-      onChanged: onChanged,
-      style: const TextStyle(color: Colors.white),
-      decoration: InputDecoration(
-        labelText: label,
-        labelStyle: TextStyle(color: AppColors.textMuted),
-        enabledBorder: OutlineInputBorder(
-          borderSide: BorderSide(color: AppColors.border),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderSide: const BorderSide(color: AppColors.accent),
-          borderRadius: BorderRadius.circular(8),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSampleChip(
-    int index,
-    bool recorded,
-    bool isRecording,
-    VoidCallback onTap,
-  ) {
-    final color = recorded ? AppColors.success : AppColors.textMuted;
-    final label = isRecording ? 'Recording...' : 'Sample $index';
-    return SizedBox(
-      width: 120,
-      child: OutlinedButton(
-        onPressed: isRecording ? null : onTap,
-        style: OutlinedButton.styleFrom(
-          side: BorderSide(color: color.withValues(alpha: 0.6)),
-          backgroundColor: recorded ? color.withValues(alpha: 0.1) : null,
-        ),
-        child: Column(
-          children: [
-            Text(
-              label,
-              style: TextStyle(
-                color: recorded ? Colors.white : AppColors.textMuted,
-                fontSize: 12,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              recorded ? 'Recorded' : 'Tap to record',
-              style: TextStyle(
-                color: recorded ? AppColors.success : AppColors.textMuted,
-                fontSize: 10,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    ws.connect(host: host, port: port);
+    final portLabel = port == null ? 'auto' : port.toString();
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('Reconnecting to $host:$portLabel')));
   }
 }

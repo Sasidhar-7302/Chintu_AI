@@ -13,6 +13,7 @@ Follows tool-first architecture: API calls are cheap, LLM only for summarization
 import os
 import logging
 import datetime
+import json
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
@@ -41,10 +42,15 @@ class GoogleCalendar:
     First run will open browser for authorization.
     """
     
-    SCOPES = ['https://www.googleapis.com/auth/calendar.readonly',
-              'https://www.googleapis.com/auth/calendar.events']
+    READ_SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
+    WRITE_SCOPES = ['https://www.googleapis.com/auth/calendar.events']
     
-    def __init__(self, credentials_path: Optional[str] = None, token_path: Optional[str] = None):
+    def __init__(
+        self,
+        credentials_path: Optional[str] = None,
+        token_path: Optional[str] = None,
+        scopes: Optional[List[str]] = None,
+    ):
         """
         Initialize calendar client.
         
@@ -57,7 +63,29 @@ class GoogleCalendar:
             str(Path.home() / '.chintu' / 'credentials.json')
         )
         self.token_path = token_path or str(Path.home() / '.chintu' / 'calendar_token.json')
+        self.scopes = list(scopes or self._resolve_scopes_from_env())
         
+        self._service = None
+        self._creds = None
+
+    @classmethod
+    def scopes_for(cls, write_access: bool = False) -> List[str]:
+        scopes = list(cls.READ_SCOPES)
+        if write_access:
+            scopes.extend(cls.WRITE_SCOPES)
+        return scopes
+
+    def _resolve_scopes_from_env(self) -> List[str]:
+        raw = str(os.environ.get("CHINTU_GOOGLE_CALENDAR_SCOPES", "") or "").strip()
+        if raw:
+            scopes = [x.strip() for x in raw.split(",") if x.strip()]
+            if scopes:
+                return scopes
+        write_access = str(os.environ.get("CHINTU_GOOGLE_CALENDAR_WRITE_ACCESS", "") or "").strip().lower()
+        return self.scopes_for(write_access in {"1", "true", "yes", "on"})
+
+    def set_scopes(self, scopes: List[str]) -> None:
+        self.scopes = [str(x).strip() for x in scopes if str(x).strip()] or self.scopes_for(False)
         self._service = None
         self._creds = None
         
@@ -97,12 +125,29 @@ class GoogleCalendar:
             return
             
         if os.path.exists(self.token_path):
-            self._creds = Credentials.from_authorized_user_file(self.token_path, self.SCOPES)
+            self._creds = Credentials.from_authorized_user_file(self.token_path, self.scopes)
+        else:
+            # Phase 20: fallback to identity vault token if local token file is missing.
+            try:
+                from chintu_backend.security.identity_vault import get_identity_vault
+
+                vault = get_identity_vault()
+                token_json = vault.get_secret("google_calendar", "oauth_token")
+                if token_json:
+                    info = json.loads(token_json)
+                    self._creds = Credentials.from_authorized_user_info(info, self.scopes)
+                    if self._creds:
+                        os.makedirs(os.path.dirname(self.token_path), exist_ok=True)
+                        with open(self.token_path, "w", encoding="utf-8") as f:
+                            f.write(self._creds.to_json())
+            except Exception as e:
+                logger.debug("Vault token restore skipped: %s", e)
             
         # Refresh if expired
         if self._creds and self._creds.expired and self._creds.refresh_token:
             try:
                 self._creds.refresh(Request())
+                self._persist_token()
             except Exception as e:
                 logger.warning(f"Token refresh failed: {e}")
                 self._creds = None
@@ -124,14 +169,11 @@ class GoogleCalendar:
         
         try:
             flow = InstalledAppFlow.from_client_secrets_file(
-                self.credentials_path, self.SCOPES
+                self.credentials_path, self.scopes
             )
             self._creds = flow.run_local_server(port=0)
             
-            # Save token for future use
-            os.makedirs(os.path.dirname(self.token_path), exist_ok=True)
-            with open(self.token_path, 'w') as f:
-                f.write(self._creds.to_json())
+            self._persist_token()
                 
             logger.info("Calendar authentication successful")
             return True
@@ -139,6 +181,29 @@ class GoogleCalendar:
         except Exception as e:
             logger.error(f"Authentication failed: {e}")
             return False
+
+    def _persist_token(self) -> None:
+        if not self._creds:
+            return
+        token_json = self._creds.to_json()
+        os.makedirs(os.path.dirname(self.token_path), exist_ok=True)
+        with open(self.token_path, 'w', encoding="utf-8") as f:
+            f.write(token_json)
+        # Best-effort secure backup in vault (Phase 20).
+        try:
+            from chintu_backend.security.identity_vault import get_identity_vault
+
+            vault = get_identity_vault()
+            if vault.available:
+                vault.store_secret(
+                    service="google_calendar",
+                    username="oauth_token",
+                    secret=token_json,
+                    note="OAuth token backup for Google Calendar integration.",
+                    tags=["oauth", "google_calendar"],
+                )
+        except Exception:
+            pass
     
     def _get_service(self):
         """Get or create calendar service."""

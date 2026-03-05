@@ -106,56 +106,111 @@ class NativeController:
             except:
                 return False
 
-    def close_window_by_title(self, title_text: str) -> bool:
+    def close_window_by_title(self, title_text: str) -> int:
         """
-        Finds a top-level window by title (partial match) and closes it.
-        Returns True if close action was triggered.
+        Finds top-level windows by title (partial match) and closes them.
+        Returns number of windows closed.
         """
         if not self.enabled:
-            return False
+            return 0
             
-        logger.info(f"Native UI: Attempting to close window matching '{title_text}'...")
+        logger.info(f"Native UI: Attempting to close windows matching '{title_text}'...")
+        count = 0
         
         try:
             root = auto.GetRootControl()
             # Find window - ensure it's a WindowControl
-            # We use a custom walker or search to find top-level windows matching the name
-            # A simple way is to search immediate children of root
             
             condition = lambda c: title_text.lower() in c.Name.lower() and c.ControlTypeName == "WindowControl"
             
             # Walk top level windows
-            found_window = None
+            # We collect first to avoid issues while iterating and closing
+            targets = []
             for window in root.GetChildren():
                 if condition(window):
-                    found_window = window
-                    break
+                    targets.append(window)
             
-            if found_window:
-                logger.info(f"Native UI: Found window '{found_window.Name}', closing...")
+            if not targets:
+                logger.info(f"Native UI: No window found matching '{title_text}'")
+                return 0
                 
-                # Try WindowPattern (standard close)
-                if found_window.GetPattern(auto.PatternId.WindowPattern):
-                    found_window.GetWindowPattern().Close()
-                    return True
+            for found_window in targets:
+                try:
+                    logger.info(f"Native UI: Found window '{found_window.Name}', closing...")
                     
-                # Try finding a close button in the title bar if pattern fails
-                # (Some custom UIs don't implement WindowPattern)
-                close_btn = found_window.ButtonControl(Name="Close")
-                if close_btn.Exists(maxSearchSeconds=1):
-                    self._click_uia_element(close_btn)
-                    return True
-                    
-                # Fallback: Alt+F4 via input simulation (last resort)
-                found_window.SetFocus()
-                auto.SendKeys('{Alt}{F4}')
-                return True
-                
-            logger.info(f"Native UI: No window found matching '{title_text}'")
-            return False
+                    # Try WindowPattern (standard close)
+                    if found_window.GetPattern(auto.PatternId.WindowPattern):
+                        found_window.GetWindowPattern().Close()
+                        count += 1
+                        continue
+                        
+                    # Try finding a close button
+                    close_btn = found_window.ButtonControl(Name="Close")
+                    if close_btn.Exists(maxSearchSeconds=1):
+                        self._click_uia_element(close_btn)
+                        count += 1
+                        continue
+                        
+                    # Fallback: Alt+F4
+                    found_window.SetFocus()
+                    auto.SendKeys('{Alt}{F4}')
+                    count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to close window '{found_window.Name}': {e}")
+            
+            return count
             
         except Exception as e:
             logger.error(f"Native UI Close Window Error: {e}")
+            return count
+
+    def maximize_window_by_title(self, title_text: str) -> bool:
+        """
+        Finds a top-level window by title (partial match) and maximizes it.
+        Returns True if successful.
+        """
+        if not self.enabled:
+            return False
+            
+        logger.info(f"Native UI: Attempting to maximize window matching '{title_text}'...")
+        
+        try:
+            root = auto.GetRootControl()
+            condition = lambda c: title_text.lower() in c.Name.lower() and c.ControlTypeName == "WindowControl"
+            
+            targets = []
+            for window in root.GetChildren():
+                if condition(window):
+                    targets.append(window)
+            
+            if not targets:
+                logger.info(f"Native UI: No window found matching '{title_text}'")
+                return False
+                
+            # Maximize the first match
+            for found_window in targets:
+                try:
+                    logger.info(f"Native UI: Found window '{found_window.Name}', maximizing...")
+                    
+                    if found_window.GetPattern(auto.PatternId.WindowPattern):
+                        pattern = found_window.GetWindowPattern()
+                        
+                        # Smart Check: Is it already maximized?
+                        if pattern.CurrentWindowVisualState == auto.WindowVisualState.Maximized:
+                            logger.info(f"Window '{found_window.Name}' is already maximized.")
+                            found_window.SetFocus()
+                            return True
+                            
+                        pattern.SetWindowVisualState(auto.WindowVisualState.Maximized)
+                        found_window.SetFocus() # Bring to front
+                        return True
+                except Exception as e:
+                    logger.warning(f"Failed to maximize window '{found_window.Name}': {e}")
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Native UI Maximize Window Error: {e}")
             return False
 
     def list_elements_in_active_window(self) -> List[str]:

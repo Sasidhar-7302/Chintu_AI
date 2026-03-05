@@ -8,37 +8,45 @@ import threading
 import queue
 import logging
 import asyncio
+import atexit
 import tempfile
 import os
 import random
 import time
+import sys
+import re
 from typing import Optional, Callable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Try edge-tts (natural voices)
-try:
-    import edge_tts
-    HAS_EDGE_TTS = True
-except ImportError:
-    HAS_EDGE_TTS = False
-    logger.warning("edge-tts not installed.")
+# Fast init path for tests to avoid slow COM initialization.
+def _fast_tts_init_enabled() -> bool:
+    return bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("CHINTU_TTS_FAST_INIT")
+        or "pytest" in sys.modules
+        or any("pytest" in arg for arg in sys.argv)
+        or os.environ.get("CHINTU_TTS_AUTO_SPEAK", "").strip().lower() in ("false", "0", "no")
+        or any(key.startswith("PYTEST") for key in os.environ)
+    )
 
-# Try pyttsx3 as fallback
-try:
-    import pyttsx3
-    HAS_PYTTSX3 = True
-except ImportError:
-    HAS_PYTTSX3 = False
+# Optional deps are loaded lazily inside _init_engine.
+edge_tts = None
+pyttsx3 = None
+pygame = None
+HAS_EDGE_TTS = False
+HAS_PYTTSX3 = False
+HAS_PYGAME = False
+_INTERPRETER_SHUTTING_DOWN = False
 
-# Try pygame for audio playback
-try:
-    import pygame
-    pygame.mixer.init()
-    HAS_PYGAME = True
-except:
-    HAS_PYGAME = False
+
+def _mark_interpreter_shutdown() -> None:
+    global _INTERPRETER_SHUTTING_DOWN
+    _INTERPRETER_SHUTTING_DOWN = True
+
+
+atexit.register(_mark_interpreter_shutdown)
 
 
 # Professional-friendly phrases (warm but not slang)
@@ -72,6 +80,56 @@ ERROR_PHRASES = [
     "Something went wrong, let me try again.",
 ]
 
+_SPEECH_URL_RE = re.compile(r"https?://\S+|www\.\S+", flags=re.IGNORECASE)
+_SPEECH_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)", flags=re.IGNORECASE)
+_SPEECH_CITATION_RE = re.compile(r"\[(?:\s*source\s*)?\d+\]", flags=re.IGNORECASE)
+_SPEECH_SOURCE_LABEL_RE = re.compile(r"\b(?:sources?|citations?)\s*:\s*", flags=re.IGNORECASE)
+_SPEECH_DECOR_RE = re.compile(r"(?:={3,}|_{3,}|~{3,})")
+_SPEECH_ESCAPED_RE = re.compile(r"(?:\\[nrt])+")
+
+
+def _fallback_sanitize_for_speech(text: str, preserve_links: bool = False) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    raw = _SPEECH_MD_LINK_RE.sub(r"\1", raw)
+    raw = _SPEECH_ESCAPED_RE.sub(" ", raw)
+    raw = _SPEECH_DECOR_RE.sub(" ", raw)
+    if not preserve_links:
+        raw = _SPEECH_SOURCE_LABEL_RE.sub("", raw)
+        raw = _SPEECH_CITATION_RE.sub("", raw)
+        raw = _SPEECH_URL_RE.sub("", raw)
+        raw = re.sub(r"\bsource\b", "", raw, flags=re.IGNORECASE)
+    raw = raw.replace("`", " ")
+    raw = raw.replace("\\", " ")
+    raw = raw.replace("*", " ")
+    raw = re.sub(r"\s+", " ", raw).strip(" -|")
+    return raw
+
+
+def _sanitize_for_speech(text: str, preserve_links: bool = False) -> str:
+    try:
+        from ..core.command_handler import sanitize_for_tts
+
+        cleaned = sanitize_for_tts(text, preserve_links=preserve_links)
+        if cleaned:
+            return cleaned
+    except Exception:
+        pass
+    return _fallback_sanitize_for_speech(text, preserve_links=preserve_links)
+
+
+def _is_runtime_shutdown_error(exc: Exception | str) -> bool:
+    msg = str(exc or "").lower()
+    shutdown_tokens = (
+        "cannot schedule new futures after interpreter shutdown",
+        "cannot create new thread at interpreter shutdown",
+        "interpreter shutdown",
+        "event loop is closed",
+        "cannot be called from a running event loop",
+    )
+    return any(token in msg for token in shutdown_tokens)
+
 
 class TextToSpeech:
     """
@@ -100,6 +158,8 @@ class TextToSpeech:
         self._use_edge_tts = False
         self._pyttsx_engine = None
         self._stop_signal = threading.Event()
+        self._local_fallback_unavailable_logged = False
+        self._edge_unavailable_logged = False
         
         self._on_start: Optional[Callable[[], None]] = None
         self._on_done: Optional[Callable[[], None]] = None
@@ -114,37 +174,152 @@ class TextToSpeech:
     def _init_engine(self):
         """Initialize the best available TTS engine.
         
-        Priority: pyttsx3 (local, instant) > edge-tts (cloud, slow but natural)
-        Local TTS is preferred for speed - edge-tts takes 10-60 seconds for network.
+        Engine order depends on `tts_engine_mode`:
+        - quality: edge-tts first (natural), then pyttsx3 fallback
+        - balanced: edge-tts first, then pyttsx3 fallback
+        - speed: pyttsx3 first, then edge-tts fallback
         """
-        # PREFER pyttsx3 for instant local speech (no network latency)
-        if HAS_PYTTSX3:
+        if _fast_tts_init_enabled():
+            # Lightweight test mode: mark available without heavy COM init.
+            self._use_edge_tts = False
+            self._available = True
+            logger.info("TTS fast-init enabled (tests)")
+            return
+
+        global pyttsx3, edge_tts, pygame, HAS_PYTTSX3, HAS_EDGE_TTS, HAS_PYGAME
+        mode = "quality"
+        try:
+            from ..core.config import get_config
+
+            configured_mode = str(getattr(get_config(), "tts_engine_mode", "quality") or "quality").strip().lower()
+            if configured_mode in {"quality", "balanced", "speed"}:
+                mode = configured_mode
+        except Exception:
+            mode = "quality"
+
+        def _try_pyttsx() -> bool:
+            global pyttsx3, HAS_PYTTSX3
+            if not HAS_PYTTSX3:
+                try:
+                    import pyttsx3 as _pyttsx3
+
+                    pyttsx3 = _pyttsx3
+                    HAS_PYTTSX3 = True
+                except ImportError:
+                    HAS_PYTTSX3 = False
+            if not HAS_PYTTSX3:
+                return False
             try:
                 self._pyttsx_engine = pyttsx3.init()
-                voices = self._pyttsx_engine.getProperty('voices')
-                # Try to find a male voice (David on Windows)
+                voices = self._pyttsx_engine.getProperty("voices")
+                # Try to find a clearer male voice on Windows.
                 for voice in voices or []:
-                    if 'david' in voice.name.lower():
-                        self._pyttsx_engine.setProperty('voice', voice.id)
+                    if "david" in voice.name.lower():
+                        self._pyttsx_engine.setProperty("voice", voice.id)
                         break
-                self._pyttsx_engine.setProperty('rate', 180)  # Slightly faster
+                self._pyttsx_engine.setProperty("rate", 176)
                 self._use_edge_tts = False
                 self._available = True
-                logger.info("TTS initialized with pyttsx3 (local, instant)")
-                return
-            except Exception as e:
-                logger.warning(f"pyttsx3 init failed: {e}")
-        
-        # Fallback to edge-tts (cloud-based, higher quality but slow)
-        if HAS_EDGE_TTS and HAS_PYGAME:
+                logger.info("TTS initialized with pyttsx3 (local).")
+                return True
+            except Exception as exc:
+                logger.warning(f"pyttsx3 init failed: {exc}")
+                return False
+
+        def _try_edge() -> bool:
+            global edge_tts, pygame, HAS_EDGE_TTS, HAS_PYGAME
+            if not HAS_EDGE_TTS:
+                try:
+                    import edge_tts as _edge_tts
+
+                    edge_tts = _edge_tts
+                    HAS_EDGE_TTS = True
+                except ImportError:
+                    HAS_EDGE_TTS = False
+            if not HAS_PYGAME:
+                try:
+                    import pygame as _pygame
+
+                    _pygame.mixer.init()
+                    pygame = _pygame
+                    HAS_PYGAME = True
+                except Exception as exc:
+                    HAS_PYGAME = False
+                    logger.debug(f"pygame mixer init failed: {exc}")
+            if not (HAS_EDGE_TTS and HAS_PYGAME):
+                return False
             try:
                 self._use_edge_tts = True
                 self._available = True
-                logger.info(f"TTS initialized with edge-tts (cloud, high-quality voice: {self.VOICE})")
-                return
-            except Exception as e:
-                logger.warning(f"edge-tts init failed: {e}")
+                logger.info(f"TTS initialized with edge-tts (natural voice: {self.VOICE}).")
+                return True
+            except Exception as exc:
+                logger.warning(f"edge-tts init failed: {exc}")
                 self._use_edge_tts = False
+                return False
+
+        # Engine selection policy.
+        if mode == "speed":
+            if _try_pyttsx():
+                return
+            if _try_edge():
+                return
+        else:
+            if _try_edge():
+                return
+            if _try_pyttsx():
+                return
+        
+        # Final check: if neither engine worked or no output hardware
+        if not self.check_output_available():
+            logger.warning("No audio output hardware detected. TTS will be disabled.")
+            self._available = False
+
+    def _ensure_local_fallback_engine(self) -> bool:
+        """Best-effort lazy init of local fallback engine."""
+        if self._pyttsx_engine:
+            return True
+
+        global pyttsx3, HAS_PYTTSX3
+        if not HAS_PYTTSX3:
+            try:
+                import pyttsx3 as _pyttsx3
+
+                pyttsx3 = _pyttsx3
+                HAS_PYTTSX3 = True
+            except Exception:
+                HAS_PYTTSX3 = False
+                return False
+        try:
+            self._pyttsx_engine = pyttsx3.init()
+            voices = self._pyttsx_engine.getProperty("voices")
+            for voice in voices or []:
+                if "david" in str(getattr(voice, "name", "")).lower():
+                    self._pyttsx_engine.setProperty("voice", voice.id)
+                    break
+            self._pyttsx_engine.setProperty("rate", 176)
+            return True
+        except Exception:
+            return False
+    
+    def check_output_available(self) -> bool:
+        """Check if any speaker hardware is actually available."""
+        # Try sounddevice if available (most reliable for query)
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+            has_output = any(d.get("max_output_channels", 0) > 0 for d in devices)
+            return has_output
+        except Exception:
+            pass
+            
+        # Fallback to checking pyttsx/pygame status
+        if self._pyttsx_engine:
+            return True
+        if HAS_PYGAME and pygame.mixer.get_init():
+            return True
+            
+        return False
     
     @property
     def is_available(self) -> bool:
@@ -252,9 +427,22 @@ class TextToSpeech:
         if was_speaking:
             logger.info("TTS stopped (barge-in)")
     
-    def speak(self, text: str, priority: bool = False):
+    def speak(
+        self,
+        text: str,
+        priority: bool = False,
+        sanitize: bool = True,
+        preserve_links: bool = False,
+    ):
         """Queue text to be spoken."""
         if not self._available or not text:
+            return
+
+        queued_text = str(text or "")
+        if sanitize:
+            queued_text = _sanitize_for_speech(queued_text, preserve_links=preserve_links)
+        queued_text = str(queued_text or "").strip()
+        if not queued_text:
             return
         
         # CRITICAL FIX: Clear stop signal before queuing new speech
@@ -268,8 +456,8 @@ class TextToSpeech:
                 except queue.Empty:
                     break
         
-        self._speech_queue.put(text)
-        logger.debug(f"Queued speech: {text[:50]}...")
+        self._speech_queue.put(queued_text)
+        logger.debug(f"Queued speech: {queued_text[:50]}...")
     
     async def _speak_edge_tts(self, text: str, output_path: Path):
         """Generate audio using edge-tts."""
@@ -280,6 +468,18 @@ class TextToSpeech:
             volume=self._volume,
         )
         await communicate.save(str(output_path))
+
+    def synthesize_to_file(self, text: str, output_path: Path) -> bool:
+        """Generate an audio file without playing it."""
+        if not self._available or not text:
+            return False
+        try:
+            if self._use_edge_tts and HAS_EDGE_TTS:
+                asyncio.run(self._speak_edge_tts(text, output_path))
+                return output_path.exists()
+        except Exception:
+            return False
+        return False
     
     def speak_sync(self, text: str):
         """Speak text synchronously with progressive display.
@@ -294,6 +494,9 @@ class TextToSpeech:
             # CRITICAL FIX: Check stop signal before starting
             if self._stop_signal.is_set():
                 logger.debug("TTS skipped - stop signal already set")
+                return
+            if _INTERPRETER_SHUTTING_DOWN:
+                logger.debug("TTS skipped - interpreter shutdown in progress")
                 return
             
             self._stop_signal.clear()
@@ -350,6 +553,9 @@ class TextToSpeech:
                 # Speak this sentence
                 if self._use_edge_tts:
                     try:
+                        if _INTERPRETER_SHUTTING_DOWN:
+                            logger.debug("Skipping Edge-TTS sentence - interpreter shutdown in progress")
+                            break
                         import time
                         unique_id = f"{int(time.time() * 1000)}_{hash(sentence) % 10000}"
                         audio_file = self._temp_dir / f"tts_{unique_id}.mp3"
@@ -378,14 +584,24 @@ class TextToSpeech:
                                 except:
                                     pass
                     except Exception as edge_err:
+                        if _is_runtime_shutdown_error(edge_err):
+                            if not self._edge_unavailable_logged:
+                                logger.warning(
+                                    "Edge-TTS skipped during shutdown (%s).",
+                                    edge_err,
+                                )
+                                self._edge_unavailable_logged = True
+                            break
                         logger.warning(f"Edge-TTS failed ({edge_err}). Falling back to local TTS.")
                         # Fallback to pyttsx3 for this sentence
-                        if HAS_PYTTSX3 and self._pyttsx_engine:
+                        if self._ensure_local_fallback_engine():
                             logger.info(f"Speaking (Local Fallback): '{sentence}'")
                             self._pyttsx_engine.say(sentence)
                             self._pyttsx_engine.runAndWait()
                         else:
-                            logger.error("Local TTS (pyttsx3) not available for fallback.")
+                            if not self._local_fallback_unavailable_logged:
+                                logger.warning("Local TTS fallback is unavailable; skipping spoken audio for this segment.")
+                                self._local_fallback_unavailable_logged = True
 
             # Print final newline
             print(flush=True)

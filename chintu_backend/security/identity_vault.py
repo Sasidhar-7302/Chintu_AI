@@ -60,11 +60,18 @@ class IdentityVault:
     def __init__(self) -> None:
         self.config = get_config()
         self.enabled = bool(getattr(self.config, "identity_vault_enabled", True))
+        # Fallback for data_dir if not present in config
+        data_dir = getattr(self.config, "data_dir", None)
+        if not data_dir:
+            data_dir = Path.home() / ".chintu"
+        else:
+            data_dir = Path(data_dir)
+
         self.key_path: Path = Path(
-            getattr(self.config, "identity_vault_key_path", self.config.data_dir / "identity.key")
+            getattr(self.config, "identity_vault_key_path", data_dir / "identity.key")
         )
         self.meta_path: Path = Path(
-            getattr(self.config, "identity_vault_meta_path", self.config.data_dir / "identity_meta.json")
+            getattr(self.config, "identity_vault_meta_path", data_dir / "identity_meta.json")
         )
         self.keyring_service_name: str = str(
             getattr(self.config, "identity_vault_keyring_service_name", "chintu_ai_identity")

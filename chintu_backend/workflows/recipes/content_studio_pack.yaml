@@ -1,0 +1,11 @@
+name: content-studio-pack
+description: "Cofounder workflow pack: script + captions + thumbnail brief + publish staging checklist."
+args:
+  topic:
+    default: "local-first autonomous cofounder strategy"
+  platform:
+    default: "youtube"
+steps:
+  - id: execute
+    command: "shell:python scripts/workflow_packs/content_studio_pack.py --topic \"${topic}\" --platform ${platform}"
+

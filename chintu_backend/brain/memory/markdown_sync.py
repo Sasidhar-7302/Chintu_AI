@@ -62,14 +62,16 @@ class MarkdownMemorySync:
         if not getattr(self.config, "memory_markdown_sync_enabled", False):
             self.state_manager.update_feature("memory_markdown_sync", enabled=False, status="inactive")
             return False, "Markdown sync disabled in config"
-        if not getattr(self.memory_manager, "collection", None):
+        has_collection = bool(getattr(self.memory_manager, "collection", None))
+        has_hybrid = hasattr(self.memory_manager, "save_interaction")
+        if not (has_collection or has_hybrid):
             self.state_manager.update_feature(
                 "memory_markdown_sync",
                 enabled=False,
                 status="inactive",
                 error="memory_unavailable",
             )
-            return False, "Memory collection unavailable"
+            return False, "Memory backend unavailable"
         if self._running:
             return True, "Markdown sync already running"
 
@@ -113,7 +115,7 @@ class MarkdownMemorySync:
     # ------------------------------------------------------------------
     def sync_once(self) -> Dict[str, int]:
         collection = getattr(self.memory_manager, "collection", None)
-        if not collection:
+        if not collection and not hasattr(self.memory_manager, "save_interaction"):
             return {"synced": 0, "skipped": 0}
 
         synced = 0
@@ -163,6 +165,8 @@ class MarkdownMemorySync:
 
     def _sync_file(self, path: Path, force: bool) -> bool:
         collection = getattr(self.memory_manager, "collection", None)
+        if not collection and hasattr(self.memory_manager, "save_interaction"):
+            return self._sync_file_hybrid(path, force)
         if not collection:
             return False
 
@@ -215,6 +219,53 @@ class MarkdownMemorySync:
 
         self._state[str(path)] = MarkdownSyncState(str(path), mtime, content_hash)
         logger.info("Markdown memory synced: %s (%d chunks)", path.name, len(chunks))
+        return True
+
+    def _sync_file_hybrid(self, path: Path, force: bool) -> bool:
+        """Sync Markdown into HybridMemory (SQLite+embeddings)."""
+        content = path.read_text(encoding="utf-8", errors="ignore")
+        content_hash = _hash_text(content)
+        mtime = path.stat().st_mtime
+        prev = self._state.get(str(path))
+        if not force and prev and prev.content_hash == content_hash:
+            prev.mtime = mtime
+            return False
+
+        # Archive previous chunks for this file (best effort)
+        source_key = f"markdown_sync:{path.name}"
+        try:
+            if hasattr(self.memory_manager, "archive_by_source"):
+                self.memory_manager.archive_by_source(source_key)
+        except Exception:
+            pass
+
+        chunks = self._chunk_markdown(content)
+        if not chunks:
+            self._state[str(path)] = MarkdownSyncState(str(path), mtime, content_hash)
+            return False
+
+        for i, chunk in enumerate(chunks):
+            meta = {
+                "category": "knowledge",
+                "source": source_key,
+                "tags": [path.stem, path.name, f"chunk:{i}"],
+                "importance": 0.6,
+            }
+            try:
+                self.memory_manager.save_interaction("markdown", chunk, meta=meta, category="knowledge", source=source_key)
+            except Exception:
+                # Continue syncing remaining chunks
+                pass
+
+        try:
+            cache = getattr(self.memory_manager, "_cache", None)
+            if cache:
+                cache.clear()
+        except Exception:
+            pass
+
+        self._state[str(path)] = MarkdownSyncState(str(path), mtime, content_hash)
+        logger.info("Markdown memory synced (hybrid): %s (%d chunks)", path.name, len(chunks))
         return True
 
     def _chunk_markdown(self, content: str) -> List[str]:

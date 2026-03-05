@@ -40,6 +40,7 @@ class StdioMcpClient:
         self._stderr_thread: Optional[threading.Thread] = None
         self._queue: queue.Queue[Dict[str, Any]] = queue.Queue()
         self._next_id = 1
+        self._initialized = False
 
     def start(self) -> None:
         if self._process:
@@ -58,13 +59,22 @@ class StdioMcpClient:
         self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
         self._stderr_thread.start()
         logger.info("Started MCP server: %s %s", self.command, " ".join(self.args))
+        try:
+            self._initialize_session()
+        except Exception:
+            self.stop()
+            raise
 
     def stop(self) -> None:
         if not self._process:
             return
-        self._process.terminate()
-        self._process.wait(timeout=5)
+        try:
+            self._process.terminate()
+            self._process.wait(timeout=5)
+        except Exception:
+            pass
         self._process = None
+        self._initialized = False
 
     def call(self, method: str, params: Optional[Dict[str, Any]] = None, timeout: float = 30.0) -> McpResponse:
         if not self._process or not self._process.stdin:
@@ -82,6 +92,43 @@ class StdioMcpClient:
         self._process.stdin.flush()
         response = self._wait_for_response(request_id, timeout)
         return McpResponse(response)
+
+    def _notify(self, method: str, params: Optional[Dict[str, Any]] = None) -> None:
+        if not self._process or not self._process.stdin:
+            return
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {},
+        }
+        line = json.dumps(payload, ensure_ascii=True)
+        self._process.stdin.write(line + "\n")
+        self._process.stdin.flush()
+
+    def _initialize_session(self) -> None:
+        """Perform MCP initialize handshake before tool calls."""
+        versions = ("2024-11-05", "2024-10-07", "2024-09-30")
+        last_error: Optional[Exception] = None
+        for protocol_version in versions:
+            try:
+                response = self.call(
+                    "initialize",
+                    params={
+                        "protocolVersion": protocol_version,
+                        "clientInfo": {"name": "chintu-mcp-client", "version": "1.0"},
+                        "capabilities": {},
+                    },
+                    timeout=12.0,
+                )
+                if response.result is None:
+                    raise RuntimeError("initialize returned no result")
+                self._notify("notifications/initialized", {})
+                self._initialized = True
+                return
+            except Exception as exc:
+                last_error = exc
+                continue
+        raise RuntimeError(f"MCP initialize handshake failed: {last_error}")
 
     def _read_stdout(self) -> None:
         assert self._process and self._process.stdout

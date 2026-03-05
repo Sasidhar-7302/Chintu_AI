@@ -272,6 +272,80 @@ def handle_fix_code(text: str, context: Dict[str, Any]) -> ActionResult:
     return ActionResult.fail(result.get("error") or result.get("message") or "Fix failed.", "fix_code")
 
 
+def handle_create_agent(text: str, context: Dict[str, Any]) -> ActionResult:
+    """
+    Create a new sub-agent with a specific role.
+
+    Examples:
+        "create agent founder as biz"
+        "new agent dev named builder"
+    """
+    from .agent_factory import create_agent
+
+    query = text.strip().lower()
+    role_match = re.search(r"\b(founder|pm|dev|growth|ops|research)\b", query)
+    name_match = re.search(r"\b(named|as)\s+([a-z0-9_-]{2,})\b", query)
+    role = role_match.group(1) if role_match else "dev"
+    agent_key = name_match.group(2) if name_match else f"{role}_agent"
+
+    channel = context.get("channel")
+    user_id = context.get("user_id")
+    runtime = create_agent(agent_key, role, channel=channel, user_id=user_id)
+    return ActionResult.ok(
+        f"Created agent '{agent_key}' with role '{role}'.",
+        {"agent_key": agent_key, "role": role, "workspace_dir": str(runtime.workspace_dir)},
+        "create_agent",
+    )
+
+
+def handle_self_update(text: str, context: Dict[str, Any]) -> ActionResult:
+    """
+    Run a self-update proposal on a file with optional tests.
+
+    Examples:
+        "self update chintu_backend/core/model_router.py: improve routing"
+        "self update file main.py: fix crash, test command: pytest -q"
+    """
+    from .coding_agent import get_coding_agent
+    from ..core.config import get_config
+
+    config = get_config()
+    if not getattr(config, "coding_agent_self_update_enabled", True):
+        return ActionResult.fail("Self-update is disabled by policy.", "self_update")
+
+    file_path = _extract_file_path(text)
+    issue = _extract_issue(text, file_path)
+    test_command = _extract_test_command(text) or getattr(config, "coding_agent_self_update_default_tests", "pytest -q")
+    run_tests = "skip tests" not in text.lower()
+
+    if not file_path:
+        return ActionResult.fail("Please specify the file to update.", "self_update")
+    if not issue:
+        return ActionResult.fail("Please describe the change.", "self_update")
+
+    llm = context.get("llm_client")
+    agent = get_coding_agent(llm)
+    if not agent:
+        return ActionResult.fail("Coding agent is not available.", "self_update")
+
+    try:
+        result = _run_async(
+            agent.propose_fix(
+                issue=issue,
+                file_path=file_path,
+                test_command=test_command,
+                run_tests=run_tests,
+            )
+        )
+    except Exception as exc:
+        logger.error("Self-update failed: %s", exc)
+        return ActionResult.fail(f"Self-update failed: {exc}", "self_update")
+
+    if result.get("success"):
+        return ActionResult.ok(result.get("message", "Update proposed."), result, "self_update")
+    return ActionResult.fail(result.get("error") or result.get("message") or "Update failed.", "self_update")
+
+
 def register_agent_capabilities(registry) -> None:
     """Register all agent-related capabilities."""
     
@@ -340,6 +414,36 @@ def register_agent_capabilities(registry) -> None:
         examples=[
             "Fix code in main.py: crashes on startup",
             "Debug file chintu/core/config.py because env vars aren't loading",
+        ],
+    ))
+
+    registry.register(Capability(
+        name="create_agent",
+        triggers=[
+            "create agent", "new agent", "spawn agent", "make agent"
+        ],
+        handler=handle_create_agent,
+        requires_confirmation=False,
+        description="create a new sub-agent with a role template",
+        capability_type=CapabilityType.AI_AGENT,
+        examples=[
+            "Create agent founder as biz",
+            "New agent dev named builder",
+        ],
+    ))
+
+    registry.register(Capability(
+        name="self_update",
+        triggers=[
+            "self update", "self-update", "update yourself", "modify yourself", "self modify"
+        ],
+        handler=handle_self_update,
+        requires_confirmation=True,
+        description="propose a self-update with tests and approval",
+        capability_type=CapabilityType.AI_AGENT,
+        examples=[
+            "Self update chintu_backend/core/model_router.py: improve routing",
+            "Self update file main.py: fix crash, test command: pytest -q",
         ],
     ))
     

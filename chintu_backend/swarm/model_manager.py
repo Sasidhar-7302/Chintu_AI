@@ -38,6 +38,7 @@ class ModelManager:
         model: str,
         messages: List[Dict[str, str]],
         keep_alive: int = -1,
+        timeout: Optional[float] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """Send a chat request and return (content, raw_response)."""
         if not model:
@@ -53,7 +54,7 @@ class ModelManager:
             "messages": messages,
             "keep_alive": keep_alive,
         }
-        data = self._post_json("/api/chat", payload)
+        data = self._post_json("/api/chat", payload, timeout=timeout)
         content = data.get("message", {}).get("content", "")
         return content, data
 
@@ -74,9 +75,9 @@ class ModelManager:
         self._post_json("/api/chat", payload)
         logger.info("Loaded model: %s", model)
 
-    def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_json(self, path: str, payload: Dict[str, Any], timeout: Optional[float] = None) -> Dict[str, Any]:
         url = f"{self.base_url}{path}"
-        response = self._session.post(url, json=payload, timeout=self.timeout)
+        response = self._session.post(url, json=payload, timeout=timeout or self.timeout)
         response.raise_for_status()
         if not response.content:
             return {}

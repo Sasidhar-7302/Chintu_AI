@@ -165,7 +165,10 @@ Request: {request!r}
         start_hour = int(run_window.get("start_hour", defaults.get("run_start_hour", 9)))
         end_hour = int(run_window.get("end_hour", defaults.get("run_end_hour", 21)))
         start_hour = max(0, min(23, start_hour))
-        end_hour = max(start_hour + 1, min(24, end_hour))
+        end_hour = max(0, min(24, end_hour))
+        # Allow windows that span midnight (e.g. 22 -> 6). Avoid a zero-length window.
+        if end_hour == start_hour:
+            end_hour = 24 if start_hour == 23 else start_hour + 1
 
         budget = int(spec.get("daily_budget_minutes", defaults.get("daily_budget_minutes", 120)))
         budget = max(15, min(24 * 60, budget))

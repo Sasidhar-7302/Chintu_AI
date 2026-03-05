@@ -319,16 +319,14 @@ def register_help_capabilities() -> None:
     registry.register(Capability(
         name="setup_guide",
         triggers=[
-            "setup", "configure", "connect", "how to setup",
-            "setup telegram", "setup google calendar", "setup calendar",
-            "connect telegram", "connect calendar",
-            "what features have issues", "features not working"
+            "setup", "configure", "how to setup",
+            "guide", "integration", "not working", "broken"
         ],
         handler=handle_setup_guide,
         requires_confirmation=False,
-        description="get setup instructions for integrations",
+        description="get setup instructions for integrations and features",
         capability_type=CapabilityType.SYSTEM,
-        examples=["Setup telegram", "How do I connect Google Calendar?", "What features have issues?"]
+        examples=["How do I setup Telegram?", "Google Calendar integration guide", "What features have issues?"]
     ))
     
     

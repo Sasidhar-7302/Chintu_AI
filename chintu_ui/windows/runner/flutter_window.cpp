@@ -1,6 +1,7 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <windows.h>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -26,6 +27,55 @@ bool FlutterWindow::OnCreate() {
   }
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+
+  // Exclude the UI window from screen-capture by default.
+  // This is the same API many "privacy overlay" apps use to hide their window in screen shares.
+  // Note: some full-desktop capture modes may still show the window depending on the capture stack.
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+  HWND hwnd = GetHandle();
+  if (hwnd) {
+    ::SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+  }
+
+  // Platform channel so the Flutter UI can toggle stealth mode on/off.
+  static constexpr char kStealthChannelName[] = "chintu/stealth_window";
+  stealth_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(),
+      kStealthChannelName,
+      &flutter::StandardMethodCodec::GetInstance());
+
+  stealth_channel_->SetMethodCallHandler([hwnd](const auto& call, auto result) {
+    if (!hwnd) {
+      result->Error("no_window", "No top-level window handle available.");
+      return;
+    }
+
+    const std::string& method = call.method_name();
+    if (method == "setStealthMode") {
+      bool enabled = true;
+      if (call.arguments() && std::holds_alternative<bool>(*call.arguments())) {
+        enabled = std::get<bool>(*call.arguments());
+      }
+
+      const DWORD affinity = enabled ? WDA_EXCLUDEFROMCAPTURE : 0;
+      const BOOL ok = ::SetWindowDisplayAffinity(hwnd, affinity);
+      if (!ok) {
+        result->Error("set_failed", "SetWindowDisplayAffinity failed.");
+        return;
+      }
+      result->Success(flutter::EncodableValue(true));
+      return;
+    }
+
+    if (method == "isSupported") {
+      result->Success(flutter::EncodableValue(true));
+      return;
+    }
+
+    result->NotImplemented();
+  });
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();

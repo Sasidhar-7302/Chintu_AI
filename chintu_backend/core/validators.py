@@ -351,6 +351,70 @@ class PrerequisiteChecker:
             auto_fixable=True,
             fix_command="ollama serve",
         )
+
+    def check_ollama_vision(self) -> PrereqResult:
+        """Check Ollama and ensure at least one local vision model is available."""
+        base = self.check_ollama()
+        if base.status != PrereqStatus.OK:
+            return base
+
+        try:
+            import requests
+
+            response = requests.get("http://localhost:11434/api/tags", timeout=3)
+            response.raise_for_status()
+            models = response.json().get("models", [])
+            names = [str(m.get("name", "") or "").strip().lower() for m in models if isinstance(m, dict)]
+
+            preferred = str(os.environ.get("CHINTU_VISION_OLLAMA_MODEL") or "").strip().lower()
+            if preferred:
+                preferred_base = preferred.split(":", 1)[0]
+                if any(
+                    (name == preferred)
+                    or (name.split(":", 1)[0] == preferred)
+                    or (name.split(":", 1)[0] == preferred_base)
+                    or name.startswith(f"{preferred}:")
+                    or name.startswith(f"{preferred_base}:")
+                    for name in names
+                ):
+                    return PrereqResult(
+                        name="Ollama Vision",
+                        status=PrereqStatus.OK,
+                        message=f"Vision model available (preferred={preferred})",
+                    )
+
+            vision_tokens = (
+                "qwen3-vl",
+                "llava",
+                "moondream",
+                "vision",
+                "vl",
+                "qwen2.5-vl",
+                "llama3.2-vision",
+                "minicpm-v",
+                "bakllava",
+            )
+            has_vision = any(any(token in name for token in vision_tokens) for name in names)
+            if has_vision:
+                return PrereqResult(
+                    name="Ollama Vision",
+                    status=PrereqStatus.OK,
+                    message="Vision model available",
+                )
+            return PrereqResult(
+                name="Ollama Vision",
+                status=PrereqStatus.NOT_CONFIGURED,
+                message="Ollama is running but no local vision model is installed",
+                fix_instructions="Run: ollama pull qwen2.5-vl:7b (or llava:7b)",
+                auto_fixable=True,
+                fix_command="ollama pull qwen2.5-vl:7b",
+            )
+        except Exception as exc:
+            return PrereqResult(
+                name="Ollama Vision",
+                status=PrereqStatus.ERROR,
+                message=f"Vision model check failed: {exc}",
+            )
     
     def check_docker(self) -> PrereqResult:
         """Check if Docker is available."""
@@ -483,7 +547,7 @@ class PrerequisiteChecker:
             "sandbox": [self.check_docker],
             "voice": [self.check_audio, self.check_pip_packages],
             "llm": [self.check_ollama],
-            "vision": [self.check_ollama],
+            "vision": [self.check_ollama_vision],
             "file": [self.check_disk_space],
         }
         

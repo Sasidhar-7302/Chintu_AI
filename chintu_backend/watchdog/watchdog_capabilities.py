@@ -21,10 +21,25 @@ URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 HOST_PORT_RE = re.compile(r"([a-zA-Z0-9_.-]+:\d{2,5})")
 PORT_ONLY_RE = re.compile(r"\bport\s+(\d{2,5})\b", re.IGNORECASE)
 PROCESS_RE = re.compile(r"\bprocess\s+([a-zA-Z0-9_.-]+)\b", re.IGNORECASE)
+EVAL_RE = re.compile(r"\b(eval|evaluation)\b", re.IGNORECASE)
+METRICS_RE = re.compile(r"\bmetrics?\b", re.IGNORECASE)
+RELIABILITY_RE = re.compile(r"\b(reliability|gate)\b", re.IGNORECASE)
 
 
 def _parse_watchdog_target(text: str) -> Tuple[str, str]:
     text = text or ""
+    if RELIABILITY_RE.search(text):
+        return "reliability", "default"
+    if METRICS_RE.search(text):
+        return "metrics", "default"
+    if EVAL_RE.search(text):
+        # Optional: allow an explicit cases file path
+        tokens = [t.strip() for t in re.split(r"\s+", text) if t.strip()]
+        for tok in tokens:
+            if tok.lower().endswith(".jsonl"):
+                return "eval", tok
+        return "eval", "default"
+
     url_match = URL_RE.search(text)
     if url_match:
         return "http", url_match.group(0)
@@ -55,7 +70,8 @@ def handle_watchdog_add(text: str, _context: Dict[str, Any]) -> ActionResult:
     kind, target = _parse_watchdog_target(text)
     if not kind or not target:
         return ActionResult.fail(
-            "Tell me what to monitor, e.g. 'monitor http://localhost:3000' or 'monitor port 5173'.",
+            "Tell me what to monitor, e.g. 'monitor http://localhost:3000', "
+            "'monitor port 5173', or 'monitor eval gate'.",
             "watchdog_add",
         )
 
@@ -150,6 +166,7 @@ def register_watchdog_capabilities(registry: Optional[CapabilityRegistry] = None
                 "monitor http://localhost:3000",
                 "watch port 5173",
                 "watch process node",
+                "monitor eval gate",
             ],
         )
     )

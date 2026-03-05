@@ -181,14 +181,20 @@ class AppDiscovery:
             else:
                 # Direct executable or command
                 if os.name == 'nt' and not os.path.isabs(path) and "/" not in path and "\\" not in path:
-                     # For bare commands like 'chrome', use 'start' to ensure PATH/Registry lookup
-                     subprocess.Popen(f"start {path}", shell=True, 
-                                    stdout=subprocess.DEVNULL, 
-                                    stderr=subprocess.DEVNULL)
+                    # For bare commands like 'chrome', use cmd /c start to ensure PATH/Registry lookup
+                    subprocess.Popen(
+                        ["cmd", "/c", "start", "", path],
+                        shell=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                 else:
-                    subprocess.Popen([path], shell=True, 
-                                   stdout=subprocess.DEVNULL, 
-                                   stderr=subprocess.DEVNULL)
+                    subprocess.Popen(
+                        [path],
+                        shell=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                                
             logger.info(f"Opened app: {app.name} ({app.path})")
             return True

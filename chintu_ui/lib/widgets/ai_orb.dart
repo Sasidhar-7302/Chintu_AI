@@ -1,126 +1,138 @@
 import 'package:flutter/material.dart';
-import '../theme/app_theme.dart';
 
-class OrbColors {
-  static const Color idle = AppColors.surfaceElevated;
-  static const Color standby = AppColors.accentDeep;
-  static const Color listening = AppColors.accent;
-  static const Color processing = AppColors.accentSoft;
-  static const Color speaking = AppColors.accent;
-}
+import '../theme/app_theme.dart';
 
 class AIOrb extends StatefulWidget {
   final String state;
   final double audioLevel;
   final double size;
-  const AIOrb({super.key, this.state = 'idle', this.audioLevel = 0.0, this.size = 200});
-  @override State<AIOrb> createState() => _AIOrbState();
+
+  const AIOrb({
+    super.key,
+    this.state = 'idle',
+    this.audioLevel = 0.0,
+    this.size = 180,
+  });
+
+  @override
+  State<AIOrb> createState() => _AIOrbState();
 }
 
-class _AIOrbState extends State<AIOrb> with TickerProviderStateMixin {
-  late AnimationController _pulseController;
-  late Animation<double> _pulseAnimation;
-  
+class _AIOrbState extends State<AIOrb> with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse;
+
   @override
   void initState() {
     super.initState();
-    _pulseController = AnimationController(
-      duration: const Duration(milliseconds: 1500),
+    _pulse = AnimationController(
       vsync: this,
+      duration: const Duration(milliseconds: 1350),
     )..repeat(reverse: true);
-    _pulseAnimation = Tween<double>(begin: 0.95, end: 1.05).animate(
-      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
-    );
   }
-  
+
   @override
   void dispose() {
-    _pulseController.dispose();
+    _pulse.dispose();
     super.dispose();
   }
-  
-  Color get _orbColor {
-    switch (widget.state.toLowerCase()) {
-      case 'standby': return OrbColors.standby;
-      case 'listening': return OrbColors.listening;
-      case 'processing': return OrbColors.processing;
-      case 'speaking': return OrbColors.speaking;
-      default: return OrbColors.idle;
-    }
-  }
-  
+
   @override
   Widget build(BuildContext context) {
-    final scale = 1.0 + (widget.audioLevel * 0.15);
+    final baseColor = _stateColor(widget.state);
+    final levelScale = 1 + (widget.audioLevel.clamp(0, 1) * 0.12);
+
     return AnimatedBuilder(
-      animation: _pulseAnimation,
+      animation: _pulse,
       builder: (context, child) {
+        final pulseScale = 0.96 + (_pulse.value * 0.08);
         return Transform.scale(
-          scale: _pulseAnimation.value * scale,
+          scale: pulseScale * levelScale,
           child: Container(
             width: widget.size,
             height: widget.size,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              gradient: RadialGradient(
-                colors: [
-                  _orbColor.withValues(alpha: 0.9),
-                  _orbColor.withValues(alpha: 0.6),
-                  _orbColor.withValues(alpha: 0.3),
-                  Colors.transparent,
-                ],
-                stops: const [0.0, 0.4, 0.7, 1.0],
+              color: AppColors.surfaceStrong,
+              border: Border.all(
+                color: baseColor.withValues(alpha: 0.72),
+                width: 2,
               ),
               boxShadow: [
                 BoxShadow(
-                  color: _orbColor.withValues(alpha: 0.5),
-                  blurRadius: 60,
-                  spreadRadius: 20,
+                  color: baseColor.withValues(alpha: 0.12),
+                  blurRadius: 16,
+                  spreadRadius: 1,
                 ),
               ],
             ),
-            child: Container(), // Removed icons for minimalist look
+            child: Center(
+              child: Container(
+                width: widget.size * 0.45,
+                height: widget.size * 0.45,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: baseColor.withValues(alpha: 0.16),
+                  border: Border.all(
+                    color: baseColor.withValues(alpha: 0.5),
+                    width: 1.2,
+                  ),
+                ),
+              ),
+            ),
           ),
         );
       },
     );
   }
-  
-  IconData _getIcon() {
-    switch (widget.state.toLowerCase()) {
-      case 'standby': return Icons.mic_none;
-      case 'listening': return Icons.mic;
-      case 'processing': return Icons.psychology;
-      case 'speaking': return Icons.volume_up;
-      default: return Icons.circle;
+
+  Color _stateColor(String state) {
+    switch (state.toLowerCase()) {
+      case 'standby':
+        return AppColors.accent;
+      case 'listening':
+        return AppColors.accentSoft;
+      case 'processing':
+        return AppColors.accentDeep;
+      case 'speaking':
+        return AppColors.accent;
+      default:
+        return AppColors.borderStrong;
     }
   }
 }
 
 class StateIndicator extends StatelessWidget {
   final String state;
+
   const StateIndicator({super.key, required this.state});
-  
+
   @override
   Widget build(BuildContext context) {
-    String text;
-    switch (state.toLowerCase()) {
-      case 'standby': text = 'Wake word active'; break;
-      case 'listening': text = 'Listening...'; break;
-      case 'processing': text = 'Processing...'; break;
-      case 'speaking': text = 'Speaking... Say "Hey Chintu" to interrupt'; break;
-      case 'error': text = 'Disconnected'; break;
-      default: text = 'Say "Hey Chintu"';
-    }
     return Text(
-      text,
+      _label(state),
       textAlign: TextAlign.center,
-      style: TextStyle(
-        color: AppColors.textPrimary.withValues(alpha: 0.85),
-        fontSize: 18,
-        fontWeight: FontWeight.w300,
-        letterSpacing: 1.5,
+      style: const TextStyle(
+        color: AppColors.textMuted,
+        fontSize: 14,
+        fontWeight: FontWeight.w500,
       ),
     );
+  }
+
+  String _label(String current) {
+    switch (current.toLowerCase()) {
+      case 'standby':
+        return 'Ready';
+      case 'listening':
+        return 'Listening';
+      case 'processing':
+        return 'Thinking';
+      case 'speaking':
+        return 'Responding';
+      case 'error':
+        return 'Disconnected';
+      default:
+        return 'Idle';
+    }
   }
 }

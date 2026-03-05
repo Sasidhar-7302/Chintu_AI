@@ -15,6 +15,7 @@ import multiprocessing as mp
 import queue
 import time
 import logging
+import os
 import numpy as np
 from typing import Optional, Callable
 
@@ -166,6 +167,11 @@ def _wake_word_worker(
     """
     import numpy as np
     import time
+    import logging
+
+    worker_logger = logging.getLogger("chintu_backend.audio.wake_word_process.worker")
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     
     # Import openWakeWord in the subprocess
     try:
@@ -189,13 +195,13 @@ def _wake_word_worker(
                 oww_model = OWWModel(wakeword_models=[base_model])
                 model_key = base_model
                 
-            print(f"[WakeWordProcess] Initialized with model: {model_key}")
+            worker_logger.info("Wake-word worker initialized with model: %s", model_key)
         except Exception as e:
-            print(f"[WakeWordProcess] Failed to init openWakeWord: {e}")
+            worker_logger.warning("Wake-word worker failed to initialize openWakeWord: %s", e)
             HAS_OWW = False
     
     if not HAS_OWW:
-        print("[WakeWordProcess] openWakeWord not available, using simple energy detection")
+        worker_logger.info("openWakeWord unavailable; using energy-based fallback detection")
     
     # Detection state
     consecutive_frames = 0
@@ -249,19 +255,15 @@ def _wake_word_worker(
                 try:
                     event_queue.put_nowait("WAKE_DETECTED")
                     cooldown_until = now + cooldown_seconds
-                    print(f"[WakeWordProcess] WAKE DETECTED!")
+                    worker_logger.info("Wake-word detected")
                 except queue.Full:
                     pass
                     
         except queue.Empty:
             continue
         except Exception as e:
-            print(f"[WakeWordProcess] Error: {e}")
+            worker_logger.warning("Wake-word worker loop error: %s", e)
             import threading
             threading.Event().wait(0.1)  # Interruptible error recovery wait
             
-    print("[WakeWordProcess] Shutting down")
-
-
-# Import missing
-import os
+    worker_logger.info("Wake-word worker shutting down")

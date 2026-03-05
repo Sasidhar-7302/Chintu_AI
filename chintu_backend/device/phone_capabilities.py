@@ -8,12 +8,34 @@ import json
 import base64
 from typing import Dict, Any, Optional
 from pathlib import Path
+import re
 
 import requests
+from pydantic import BaseModel, Field
 
 from ..core.capabilities import ActionResult
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# SCHEMAS (Phase 4)
+# ============================================================================
+
+class PhoneCameraSchema(BaseModel):
+    camera: int = Field(0, description="0 for back camera, 1 for front/selfie camera.")
+
+class PhoneNotifySchema(BaseModel):
+    message: str = Field(..., description="The message content to send as notification.")
+
+class PhoneSpeakSchema(BaseModel):
+    message: str = Field(..., description="The text to speak on the phone.")
+
+class PhoneBrowserSchema(BaseModel):
+    url: str = Field(..., description="The URL or search term to open.")
+
+class ShowOnPhoneSchema(BaseModel):
+    message: str = Field(..., description="The message to display.")
 
 
 def get_connected_phone() -> Optional[str]:
@@ -56,16 +78,13 @@ def call_phone_api(endpoint: str, method: str = "GET",
 # ============================================================================
 
 def handle_phone_camera(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Take a photo with phone camera.
-    
-    Examples:
-    - "Take a photo with my phone"
-    - "Phone camera"
-    - "Capture from phone"
-    """
-    # Determine which camera (front/back)
+    """Take a photo with phone camera."""
     camera = 0  # Back camera by default
-    if "front" in text.lower() or "selfie" in text.lower():
+    
+    validated = context.get("_validated_params")
+    if validated and isinstance(validated, PhoneCameraSchema):
+        camera = validated.camera
+    elif "front" in text.lower() or "selfie" in text.lower():
         camera = 1
     
     result = call_phone_api("/camera/photo", "POST", {"camera": camera})
@@ -97,13 +116,7 @@ def handle_phone_camera(text: str, context: Dict[str, Any]) -> ActionResult:
 # ============================================================================
 
 def handle_phone_battery(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Get phone battery status.
-    
-    Examples:
-    - "What's my phone battery?"
-    - "Phone battery status"
-    - "How much charge does my phone have?"
-    """
+    """Get phone battery status."""
     result = call_phone_api("/battery")
     
     if "error" in result:
@@ -127,18 +140,15 @@ def handle_phone_battery(text: str, context: Dict[str, Any]) -> ActionResult:
 # ============================================================================
 
 def handle_phone_notify(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Send notification to phone.
+    """Send notification to phone."""
     
-    Examples:
-    - "Notify my phone"
-    - "Send notification to phone"
-    - "Alert my phone"
-    """
-    import re
-    
-    # Extract message if provided
-    match = re.search(r"(?:notify|alert|tell)\s+(?:my\s+)?phone\s+(?:that\s+)?(.+)", text.lower())
-    message = match.group(1) if match else "Hello from Chintu!"
+    validated = context.get("_validated_params")
+    if validated and isinstance(validated, PhoneNotifySchema):
+        message = validated.message
+    else:
+        # Legacy regex fallback
+        match = re.search(r"(?:notify|alert|tell)\s+(?:my\s+)?phone\s+(?:that\s+)?(.+)", text.lower())
+        message = match.group(1) if match else "Hello from Chintu!"
     
     result = call_phone_api("/display/notification", "POST", {
         "title": "Chintu",
@@ -160,31 +170,27 @@ def handle_phone_notify(text: str, context: Dict[str, Any]) -> ActionResult:
 # ============================================================================
 
 def handle_phone_speak(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Speak text on phone.
+    """Speak text on phone."""
     
-    Examples:
-    - "Say hello on my phone"
-    - "Speak on phone: Good morning"
-    - "Phone say something"
-    """
-    import re
-    
-    # Extract what to say
-    patterns = [
-        r"(?:say|speak)\s+(?:on\s+)?(?:my\s+)?phone[:\s]+(.+)",
-        r"phone\s+(?:say|speak)[:\s]+(.+)",
-        r"(?:say|speak)\s+(.+)\s+on\s+(?:my\s+)?phone",
-    ]
-    
-    message = None
-    for pattern in patterns:
-        match = re.search(pattern, text.lower())
-        if match:
-            message = match.group(1)
-            break
-    
-    if not message:
-        message = "Hello from Chintu!"
+    validated = context.get("_validated_params")
+    if validated and isinstance(validated, PhoneSpeakSchema):
+        message = validated.message
+    else:
+        patterns = [
+            r"(?:say|speak)\s+(?:on\s+)?(?:my\s+)?phone[:\s]+(.+)",
+            r"phone\s+(?:say|speak)[:\s]+(.+)",
+            r"(?:say|speak)\s+(.+)\s+on\s+(?:my\s+)?phone",
+        ]
+        
+        message = None
+        for pattern in patterns:
+            match = re.search(pattern, text.lower())
+            if match:
+                message = match.group(1)
+                break
+        
+        if not message:
+            message = "Hello from Chintu!"
     
     result = call_phone_api("/speak", "POST", {"text": message})
     
@@ -203,13 +209,7 @@ def handle_phone_speak(text: str, context: Dict[str, Any]) -> ActionResult:
 # ============================================================================
 
 def handle_phone_location(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Get phone location.
-    
-    Examples:
-    - "Where is my phone?"
-    - "Phone location"
-    - "Find my phone"
-    """
+    """Get phone location."""
     result = call_phone_api("/location", timeout=35)
     
     if "error" in result:
@@ -234,13 +234,7 @@ def handle_phone_location(text: str, context: Dict[str, Any]) -> ActionResult:
 # ============================================================================
 
 def handle_phone_vibrate(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Vibrate the phone.
-    
-    Examples:
-    - "Vibrate my phone"
-    - "Make my phone vibrate"
-    - "Ring my phone"
-    """
+    """Vibrate the phone."""
     result = call_phone_api("/vibrate", "POST", {"duration": 1000})
     
     if "error" in result:
@@ -258,17 +252,14 @@ def handle_phone_vibrate(text: str, context: Dict[str, Any]) -> ActionResult:
 # ============================================================================
 
 def handle_show_on_phone(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Show message on phone screen.
+    """Show message on phone screen."""
     
-    Examples:
-    - "Show hello on my phone"
-    - "Display this on phone"
-    """
-    import re
-    
-    # Extract message
-    match = re.search(r"(?:show|display)\s+(.+?)\s+on\s+(?:my\s+)?phone", text.lower())
-    message = match.group(1) if match else "Hello from Chintu!"
+    validated = context.get("_validated_params")
+    if validated and isinstance(validated, ShowOnPhoneSchema):
+        message = validated.message
+    else:
+        match = re.search(r"(?:show|display)\s+(.+?)\s+on\s+(?:my\s+)?phone", text.lower())
+        message = match.group(1) if match else "Hello from Chintu!"
     
     result = call_phone_api("/display/toast", "POST", {"message": message})
     
@@ -287,16 +278,8 @@ def handle_show_on_phone(text: str, context: Dict[str, Any]) -> ActionResult:
 # ============================================================================
 
 def handle_phone_browser(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Open a URL or website on phone.
+    """Open a URL or website on phone."""
     
-    Examples:
-    - "Open YouTube on my phone"
-    - "Open google.com on phone"
-    - "Phone open Chrome"
-    """
-    import re
-    
-    # Common websites
     WEBSITES = {
         "youtube": "https://youtube.com",
         "google": "https://google.com",
@@ -314,22 +297,25 @@ def handle_phone_browser(text: str, context: Dict[str, Any]) -> ActionResult:
     
     text_lower = text.lower()
     
-    # Find the target
-    patterns = [
-        r"open\s+(.+?)\s+on\s+(?:my\s+)?phone",
-        r"phone\s+open\s+(.+)",
-        r"browse\s+(.+?)\s+on\s+phone",
-    ]
-    
-    target = None
-    for pattern in patterns:
-        match = re.search(pattern, text_lower)
-        if match:
-            target = match.group(1).strip()
-            break
-    
-    if not target:
-        target = "google"
+    validated = context.get("_validated_params")
+    if validated and isinstance(validated, PhoneBrowserSchema):
+        target = validated.url
+    else:
+        patterns = [
+            r"open\s+(.+?)\s+on\s+(?:my\s+)?phone",
+            r"phone\s+open\s+(.+)",
+            r"browse\s+(.+?)\s+on\s+phone",
+        ]
+        
+        target = None
+        for pattern in patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                target = match.group(1).strip()
+                break
+        
+        if not target:
+            target = "google"
     
     # Convert to URL
     if target in WEBSITES:
@@ -372,7 +358,8 @@ def register_phone_capabilities():
         ],
         description="Take a photo with phone camera",
         examples=["Take a photo with my phone", "Phone camera"],
-        risk_level="low"
+        risk_level="low",
+        schema=PhoneCameraSchema
     )
     
     # Battery
@@ -400,7 +387,8 @@ def register_phone_capabilities():
         ],
         description="Send notification to phone",
         examples=["Notify my phone", "Send notification to phone"],
-        risk_level="low"
+        risk_level="low",
+        schema=PhoneNotifySchema
     )
     
     # Speak
@@ -413,7 +401,8 @@ def register_phone_capabilities():
         ],
         description="Speak text on phone",
         examples=["Say hello on my phone", "Phone say good morning"],
-        risk_level="low"
+        risk_level="low",
+        schema=PhoneSpeakSchema
     )
     
     # Location
@@ -454,7 +443,8 @@ def register_phone_capabilities():
         ],
         description="Show message on phone screen",
         examples=["Show hello on my phone", "Display this on phone"],
-        risk_level="low"
+        risk_level="low",
+        schema=ShowOnPhoneSchema
     )
     
     # Open URL/Browser
@@ -468,7 +458,8 @@ def register_phone_capabilities():
         ],
         description="Open URL on phone browser",
         examples=["Open YouTube on my phone", "Open google.com on phone"],
-        risk_level="low"
+        risk_level="low",
+        schema=PhoneBrowserSchema
     )
     
     logger.info("Registered phone ecosystem capabilities")

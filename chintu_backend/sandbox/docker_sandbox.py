@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -191,8 +192,41 @@ class DockerSandbox:
 
     @staticmethod
     def _ensure_docker() -> None:
-        if not shutil.which("docker"):
+        docker_bin = shutil.which("docker")
+        if not docker_bin:
             raise RuntimeError("Docker CLI not found. Please install Docker Desktop.")
+
+        healthy, message = DockerSandbox.health_check()
+        if healthy:
+            return
+
+        # On Windows, try starting Docker Desktop automatically before failing.
+        if os.name == "nt":
+            if DockerSandbox._try_start_docker_desktop():
+                healthy, message = DockerSandbox.health_check()
+                if healthy:
+                    return
+
+        raise RuntimeError(message or "Docker sandbox unavailable on this machine session.")
+
+    @staticmethod
+    def _try_start_docker_desktop(wait_seconds: int = 45) -> bool:
+        """Best-effort Docker Desktop auto-start for Windows sessions."""
+        docker_desktop_path = Path("C:/Program Files/Docker/Docker/Docker Desktop.exe")
+        if not docker_desktop_path.exists():
+            return False
+        try:
+            subprocess.Popen([str(docker_desktop_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            return False
+
+        deadline = time.time() + max(10, int(wait_seconds))
+        while time.time() < deadline:
+            healthy, _ = DockerSandbox.health_check()
+            if healthy:
+                return True
+            time.sleep(2)
+        return False
 
     @staticmethod
     def health_check() -> tuple[bool, str]:
@@ -217,6 +251,8 @@ class DockerSandbox:
             if result.returncode != 0:
                 if "Is the docker daemon running" in result.stderr:
                     return False, "Docker daemon is not running. Please start Docker Desktop."
+                if "dockerDesktopLinuxEngine" in result.stderr:
+                    return False, "Docker daemon is not running. Start Docker Desktop and wait for engine initialization."
                 return False, f"Docker error: {result.stderr.strip()}"
         except subprocess.TimeoutExpired:
             return False, "Docker daemon not responding (timeout)"

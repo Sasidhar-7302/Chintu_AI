@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "chintu": {
+      "command": "python",
+      "args": [
+        "-m",
+        "chintu_backend.mcp.server"
+      ],
+      "cwd": "C:/Users/yepur/Desktop/My_Projects/Chintu_AI"
+    }
+  }
+}

@@ -4,14 +4,19 @@ from .google_calendar import (
     GoogleCalendar,
     get_calendar,
 )
-from .home_assistant import (
-    HomeAssistant,
-    get_home_assistant,
+from .oauth_onboarding import (
+    connect_google_calendar,
+    get_google_calendar_onboarding_steps,
+    google_calendar_health,
+    revoke_google_calendar,
 )
-
+from .status import get_integrations_snapshot
 __all__ = [
     'GoogleCalendar',
     'get_calendar',
-    'HomeAssistant',
-    'get_home_assistant',
+    'connect_google_calendar',
+    'get_google_calendar_onboarding_steps',
+    'google_calendar_health',
+    'revoke_google_calendar',
+    'get_integrations_snapshot',
 ]

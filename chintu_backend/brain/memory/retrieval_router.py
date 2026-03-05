@@ -4,7 +4,7 @@ Intelligently routes queries to the appropriate memory collections.
 """
 
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -26,6 +26,16 @@ class RetrievalResult:
     source: str  # collection name
     relevance: float
     metadata: Dict[str, Any] = None
+    sources: List[str] = None
+
+
+@dataclass
+class RagAssessment:
+    confidence: float
+    needs_clarification: bool
+    needs_web_search: bool
+    reason: str
+    sources_count: int
 
 
 class RetrievalRouter:
@@ -153,17 +163,16 @@ class RetrievalRouter:
         
         try:
             if query_type == QueryType.KNOWLEDGE:
-                # Skip RAG for general knowledge
-                logger.debug("Skipping RAG for knowledge query")
-                return []
+                results.extend(self._search_library(query, max_results))
             
             elif query_type == QueryType.PERSONAL:
                 # Search personal facts + conversation history
                 results.extend(self._search_personal(query, max_results))
                 
             elif query_type == QueryType.RESEARCH:
-                # Search documents collection
+                # Search documents + curated library
                 results.extend(self._search_documents(query, max_results))
+                results.extend(self._search_library(query, max_results))
                 
             elif query_type == QueryType.TASK:
                 # Search tasks/notes from SQLite
@@ -229,6 +238,84 @@ class RetrievalRouter:
                 logger.warning(f"Document search failed: {e}")
         
         return results
+
+    def _search_library(self, query: str, max_results: int) -> List[RetrievalResult]:
+        """Search curated library content indexed into hybrid memory."""
+        results: List[RetrievalResult] = []
+        if not self.memory_manager or not hasattr(self.memory_manager, "search"):
+            return results
+        try:
+            hits = self.memory_manager.search(
+                query,
+                limit=max_results,
+                filters={"category": "library"},
+                min_score=0.05,
+            )
+        except Exception as exc:
+            logger.warning(f"Library search failed: {exc}")
+            return results
+
+        for hit in hits:
+            tags = hit.metadata.get("tags") if hit.metadata else []
+            tags = tags or []
+            sources = [t[4:] for t in tags if isinstance(t, str) and t.startswith("src:")]
+            file_tag = next((t for t in tags if isinstance(t, str) and t.startswith("file:")), "")
+            meta = dict(hit.metadata or {})
+            if file_tag:
+                meta["file"] = file_tag.replace("file:", "")
+            results.append(
+                RetrievalResult(
+                    content=hit.content,
+                    source="library",
+                    relevance=float(hit.score),
+                    metadata=meta,
+                    sources=sources,
+                )
+            )
+        return results
+
+    def assess(self, query: str, results: List[RetrievalResult]) -> RagAssessment:
+        """Assess confidence and decide if clarification or web search is needed."""
+        from chintu_backend.core.config import get_config
+
+        config = get_config()
+        min_conf = float(getattr(config, "rag_min_confidence", 0.35))
+        contested_min_sources = int(getattr(config, "rag_min_sources_contested", 2))
+        require_citations = bool(getattr(config, "rag_require_citations", True))
+
+        sources = set()
+        for res in results:
+            for src in (res.sources or []):
+                sources.add(src)
+        sources_count = len(sources)
+
+        if results:
+            avg_rel = sum(r.relevance for r in results) / len(results)
+        else:
+            avg_rel = 0.0
+
+        confidence = min(1.0, avg_rel * 0.7 + min(1.0, sources_count / 3.0) * 0.3)
+
+        tokens = [t for t in query.strip().split() if t]
+        needs_clarification = len(tokens) < 3
+
+        contested = self._is_contested(query)
+        needs_web = False
+        reason = ""
+        if contested and sources_count < contested_min_sources:
+            needs_web = True
+            reason = "contested topic needs more sources"
+        elif require_citations and confidence < min_conf:
+            needs_web = True
+            reason = "low confidence in local sources"
+
+        return RagAssessment(
+            confidence=confidence,
+            needs_clarification=needs_clarification,
+            needs_web_search=needs_web,
+            reason=reason or "sufficient",
+            sources_count=sources_count,
+        )
     
     def _search_tasks(self, query: str, max_results: int) -> List[RetrievalResult]:
         """Search tasks and notes from SQLite."""
@@ -250,18 +337,49 @@ class RetrievalRouter:
         return results
     
     def format_for_llm(self, results: List[RetrievalResult]) -> str:
-        """
-        Format retrieval results as context for LLM injection.
-        """
+        """Format retrieval results as context for LLM injection with citations."""
         if not results:
             return ""
-        
+
         lines = ["[Retrieved Context]"]
+        all_sources: List[str] = []
         for r in results:
             source_label = r.source.replace("_", " ").title()
             lines.append(f"- ({source_label}) {r.content}")
-        
+            for src in r.sources or []:
+                if src not in all_sources:
+                    all_sources.append(src)
+
+        if all_sources:
+            lines.append("")
+            lines.append("Sources:")
+            for idx, src in enumerate(all_sources, start=1):
+                lines.append(f"[{idx}] {src}")
+            lines.append("If you state facts, cite sources like [1].")
+
         return "\n".join(lines)
+
+    def _is_contested(self, query: str) -> bool:
+        from chintu_backend.core.config import get_config
+
+        config = get_config()
+        keywords = getattr(config, "rag_contested_keywords", None)
+        if not keywords:
+            keywords = [
+                "best",
+                "worst",
+                "cure",
+                "politics",
+                "religion",
+                "controversial",
+                "debate",
+                "conspiracy",
+                "health",
+                "medical",
+                "finance",
+            ]
+        query_lower = query.lower()
+        return any(word in query_lower for word in keywords)
 
 
 # Global instance

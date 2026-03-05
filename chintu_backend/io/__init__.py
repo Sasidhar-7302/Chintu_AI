@@ -7,5 +7,8 @@ try:
     from ..channels.whatsapp import WhatsAppGateway
 except Exception:  # Optional dependency (fastapi) may be missing
     WhatsAppGateway = None  # type: ignore[assignment]
-
-__all__ = ["TelegramGateway", "get_telegram_gateway", "WhatsAppGateway"]
+__all__ = [
+    "TelegramGateway",
+    "get_telegram_gateway",
+    "WhatsAppGateway",
+]

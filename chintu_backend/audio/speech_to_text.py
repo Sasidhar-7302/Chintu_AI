@@ -54,6 +54,8 @@ class SpeechToText:
         beam_size: int = 1,
         best_of: int = 1,
         partial_beam_size: int = 1,
+        reject_low_confidence_noise: bool = True,
+        low_confidence_noise_word_limit: int = 6,
     ):
         self.model_name = model_name
         self.device = device
@@ -91,6 +93,9 @@ class SpeechToText:
         self._speech_detected = False
         self._speech_frames_required = max(1, int(speech_frames_required))
         self._speech_frames = 0
+        self._listen_generation = 0
+        self._reject_low_confidence_noise = bool(reject_low_confidence_noise)
+        self._low_confidence_noise_word_limit = max(2, int(low_confidence_noise_word_limit))
         
         self._load_model()
     
@@ -198,12 +203,14 @@ class SpeechToText:
     
     def start_listening(self):
         """Start collecting audio for transcription."""
+        self._listen_generation += 1
         self._is_listening = True
         self._audio_buffer.clear()
         self._buffered_samples = 0
         self._silence_start = None
         self._partial_last_time = 0.0
         self._last_partial_text = ""
+        self._partial_in_flight = False
         self._listening_start = time.time()
         self._speech_detected = False
         self._speech_frames = 0
@@ -211,6 +218,7 @@ class SpeechToText:
     
     def stop_listening(self):
         """Stop listening and transcribe asynchronously."""
+        generation = self._listen_generation
         self._is_listening = False
         self._listening_start = None
         
@@ -223,7 +231,7 @@ class SpeechToText:
         self._buffered_samples = 0
         
         # Transcribe asynchronously
-        self._start_final_transcription(audio)
+        self._start_final_transcription(audio, generation=generation)
     
     def process_audio(self, audio_chunk: np.ndarray):
         """Process audio chunk during listening."""
@@ -368,18 +376,21 @@ class SpeechToText:
         if self._partial_in_flight or self._transcribe_in_flight or not self._on_partial:
             return
         self._partial_in_flight = True
+        generation = self._listen_generation
         audio = np.concatenate(list(self._audio_buffer))
         if len(audio) > self._partial_window_samples:
             audio = audio[-self._partial_window_samples:]
         thread = threading.Thread(
             target=self._run_partial_transcription,
-            args=(audio,),
+            args=(audio, generation),
             daemon=True,
         )
         thread.start()
 
-    def _run_partial_transcription(self, audio: np.ndarray):
+    def _run_partial_transcription(self, audio: np.ndarray, generation: int):
         try:
+            if generation != self._listen_generation:
+                return
             text = self._transcribe(audio, is_partial=True)
             if not text:
                 return
@@ -391,26 +402,39 @@ class SpeechToText:
         finally:
             self._partial_in_flight = False
 
-    def _start_final_transcription(self, audio: np.ndarray):
+    def _start_final_transcription(self, audio: np.ndarray, generation: Optional[int] = None):
         if self._transcribe_in_flight:
             return
         self._transcribe_in_flight = True
+        listen_generation = self._listen_generation if generation is None else int(generation)
         thread = threading.Thread(
             target=self._run_final_transcription,
-            args=(audio,),
+            args=(audio, listen_generation),
             daemon=True,
         )
         thread.start()
 
-    def _run_final_transcription(self, audio: np.ndarray):
+    def _run_final_transcription(self, audio: np.ndarray, generation: int):
         try:
+            if generation != self._listen_generation:
+                return
             transcript = self._transcribe(audio, is_partial=False)
+            if generation != self._listen_generation:
+                return
+            if transcript and self._reject_low_confidence_noise:
+                if self._is_uncertain_noise_transcript(transcript):
+                    logger.info(
+                        "Rejected likely noise transcript at confidence %.2f: '%s'",
+                        self._last_confidence,
+                        transcript[:60],
+                    )
+                    transcript = ""
             if transcript and self._min_confidence > 0 and self._last_confidence < self._min_confidence:
                 word_count = len(transcript.split())
                 if word_count < 3:
-                     if self._on_transcript:
-                         self._on_transcript(transcript, True)
-                     return
+                    if self._on_transcript:
+                        self._on_transcript("", True)
+                    return
                 logger.info(
                     "Transcript confidence %.2f below threshold %.2f, triggering repair loop",
                     self._last_confidence,
@@ -422,6 +446,31 @@ class SpeechToText:
                 self._on_transcript(transcript or "", True)
         finally:
             self._transcribe_in_flight = False
+
+    def _is_uncertain_noise_transcript(self, transcript: str) -> bool:
+        """Detect low-confidence noisy transcripts to prevent garbage callbacks."""
+        if not transcript:
+            return False
+        reject_threshold = max(float(self._min_confidence), 0.35)
+        if self._last_confidence >= reject_threshold:
+            return False
+
+        text = str(transcript).strip().lower()
+        words = [w for w in re.findall(r"[a-z0-9]+", text) if w]
+        if not words:
+            return True
+
+        if len(words) <= self._low_confidence_noise_word_limit:
+            # Short uncertain transcripts are usually accidental noise.
+            if all(len(w) <= 2 for w in words):
+                return True
+
+        unique_ratio = len(set(words)) / max(1, len(words))
+        avg_len = sum(len(w) for w in words) / max(1, len(words))
+        if len(words) >= 6 and unique_ratio < 0.35 and avg_len <= 2.2:
+            return True
+
+        return self._is_garbage_transcription(text)
 
     def _normalize_text(self, text: str) -> str:
         if not text:

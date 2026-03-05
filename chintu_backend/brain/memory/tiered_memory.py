@@ -268,17 +268,53 @@ class TieredMemoryStore:
         return [MemoryItem.from_row(row) for row in cursor.fetchall()]
     
     def _search(self, memory_type: MemoryType, query: str) -> List[MemoryItem]:
-        """Search memories by content."""
+        """Search memories by content using keyword intersection."""
+        import string
+        
+        # Stopwords to ignore
+        STOPWORDS = {
+            "what", "is", "my", "the", "a", "an", "of", "and", "or", "for", 
+            "to", "in", "on", "at", "by", "with", "from", "about"
+        }
+        
+        # Normalize and clean query
+        text = query.lower()
+        
+        # Remove punctuation EXCEPT apostrophe/single quote
+        # string.punctuation includes '
+        punct_to_remove = string.punctuation.replace("'", "")
+        text = text.translate(str.maketrans('', '', punct_to_remove))
+        
+        # Extract meaningful keywords
+        keywords = [
+            k.strip() for k in text.split() 
+            if k.strip() and k.strip() not in STOPWORDS
+        ]
+        
+        if not keywords:
+             keywords = [query.strip()]
+             
+        # Dynamically build query for ALL keywords (AND logic)
+        # We search both content and metadata
+        conditions = []
+        params = [memory_type.value]
+        
+        for kw in keywords:
+            conditions.append("(content LIKE ? OR metadata LIKE ?)")
+            params.extend([f"%{kw}%", f"%{kw}%"])
+            
+        where_clause = " AND ".join(conditions)
+        
         conn = self._get_conn()
         cursor = conn.execute(
-            """
+            f"""
             SELECT id, memory_type, content, metadata, created_at, expires_at, importance
             FROM memories 
-            WHERE memory_type = ? AND content LIKE ?
+            WHERE memory_type = ? AND {where_clause}
             ORDER BY importance DESC, created_at DESC
             LIMIT 20
             """,
-            (memory_type.value, f"%{query}%")
+            tuple(params)
         )
         return [MemoryItem.from_row(row) for row in cursor.fetchall()]
     

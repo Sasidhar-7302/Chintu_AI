@@ -15,6 +15,7 @@ import warnings
 from typing import Optional
 from pathlib import Path
 from datetime import datetime
+from collections import deque
 
 logger = logging.getLogger("chintu")
 
@@ -24,17 +25,40 @@ class ChintuAssistant:
     def __init__(self):
         from chintu_backend.core import (
             get_config, get_event_bus, get_state_manager,
-            CommandHandler, WebSocketServer, EventType, AssistantState
+            CommandHandler, WebSocketServer, EventType, Event, AssistantState
         )
         from chintu_backend.audio import AudioCapture, WakeWordDetector, SpeechToText
         from chintu_backend.audio import WakeWordTrainer
         from chintu_backend.vision import HandTracker, GestureRecognizer
 
         from chintu_backend.brain.llm import OllamaClient
-        from chintu_backend.automation.scheduled_tasks import get_scheduler
+        from chintu_backend.core.scheduler import get_scheduler
         from chintu_backend.automation.parallel_executor import get_parallel_executor
         
         self.config = get_config()
+        self.runtime_hardware_adapter = None
+        self._hardware_adapt_task = None
+        try:
+            from chintu_backend.agents.agent_factory import ensure_templates
+            ensure_templates()
+        except Exception:
+            pass
+        # Auto-tune hardware settings based on detected CPU/GPU/VRAM
+        if getattr(self.config, "hardware_auto_tune", False):
+            try:
+                from chintu_backend.core.hardware_optimizer import get_hardware_optimizer
+                optimizer = get_hardware_optimizer()
+                optimizer.optimize_config(self.config)
+                if bool(getattr(self.config, "hardware_adapt_runtime_enabled", True)):
+                    from chintu_backend.core.runtime_hardware_adapter import RuntimeHardwareAdapter
+
+                    self.runtime_hardware_adapter = RuntimeHardwareAdapter(
+                        config=self.config,
+                        optimizer=optimizer,
+                        on_applied=self._on_runtime_hardware_adapted,
+                    )
+            except Exception as e:
+                logger.warning(f"Hardware auto-tune failed: {e}")
         if self.config.structured_logging:
             try:
                 from chintu_backend.core.logging_config import setup_json_logging
@@ -44,6 +68,14 @@ class ChintuAssistant:
                 logger.warning(f"Failed to configure structured logging: {e}")
         self.event_bus = get_event_bus()
         self.state_manager = get_state_manager()
+        if self.runtime_hardware_adapter:
+            self.runtime_hardware_adapter.state_manager = self.state_manager
+        try:
+            from chintu_backend.canvas import get_canvas_manager
+
+            self.canvas_manager = get_canvas_manager()
+        except Exception:
+            self.canvas_manager = None
         
         # Initialize system integrator (platform, device registry, error reporting, health monitoring)
         try:
@@ -77,14 +109,18 @@ class ChintuAssistant:
 
         # Run v5.1 startup health checks
         self._run_startup_health_checks()
+        self._suppress_library_logs()
 
         # Wake word cooldown tracking (used after empty transcripts)
         self._wake_cooldown_until = 0.0
 
         # Conversation mode tracking
         self._in_conversation = False
+        self._typing_active = False # New: Track user typing state
         self._conversation_retries = 0
         self._max_conversation_retries = 2  # Retry listening 2x in conversation mode
+        self._audio_level_history = deque(maxlen=4000)
+        self._stt_noise_calibrated = False
 
         # Initialize components
         logger.info("Initializing Chintu Assistant...")
@@ -162,6 +198,8 @@ class ChintuAssistant:
             beam_size=self.config.stt_beam_size,
             best_of=self.config.stt_best_of,
             partial_beam_size=self.config.stt_partial_beam_size,
+            reject_low_confidence_noise=self.config.stt_reject_low_confidence_noise,
+            low_confidence_noise_word_limit=self.config.stt_low_confidence_noise_word_limit,
         )
         
         # Vision components
@@ -172,42 +210,210 @@ class ChintuAssistant:
         
         self.gesture_recognizer = GestureRecognizer()
         
-        # LLM (with CPU-optimized settings)
-        self.llm = OllamaClient(
-            host=self.config.ollama_host,
-            model=self.config.ollama_model,
-            max_tokens=self.config.llm_max_tokens,
-            temperature=self.config.llm_temperature,
-            num_threads=getattr(self.config, 'llm_num_threads', None),
-            num_ctx=getattr(self.config, 'llm_num_ctx', None),
-            num_gpu=getattr(self.config, 'llm_num_gpu', -1),
-        )
+        # LLM (prefer active fine-tuned adapter when available)
+        self.llm = None
+        try:
+            from ..brain.llm.adapter_client import get_adapter_client
+
+            self.llm = get_adapter_client()
+        except Exception:
+            self.llm = None
+
+        if not self.llm:
+            self.llm = OllamaClient(
+                host=self.config.ollama_host,
+                model=self.config.ollama_model,
+                max_tokens=self.config.llm_max_tokens,
+                temperature=self.config.llm_temperature,
+                num_threads=getattr(self.config, 'llm_num_threads', None),
+                num_ctx=getattr(self.config, 'llm_num_ctx', None),
+                num_gpu=getattr(self.config, 'llm_num_gpu', -1),
+                keep_alive=getattr(self.config, "ollama_keep_alive_seconds", None),
+                think=getattr(self.config, "ollama_think", None),
+            )
+
+        # Best-effort model prewarm to reduce cold-start latency.
+        self._start_prewarm_threads()
         
         # Command handling
         self.command_handler = CommandHandler(llm_client=self.llm)
 
-        # Gateway (Phase 1) - optional JSON-RPC control plane
-        self.gateway_server = None
-        self.gateway_client = None
+        # Gateway (Phase 1) - Core Node Integration
+        self.gateway_server_process = None
+        self.core_node = None
+        
         if self.config.gateway_enabled:
             try:
-                from chintu_backend.interfaces.gateway import GatewayServer, GatewayClient
-                self.gateway_server = GatewayServer(
-                    command_handler=self.command_handler,
-                    host=self.config.gateway_host,
-                    port=self.config.gateway_port,
-                    auth_token=self.config.gateway_auth_token,
+                # 1. Ensure Gateway Server is running
+                self._ensure_gateway_running()
+                
+                # 2. Initialize Core Node SDK
+                from chintu_backend.sdk.node import ChintuNode
+                from chintu_backend.protocol.enums import Role
+                
+                self.core_node = ChintuNode(
+                    role=Role.CORE,
+                    device_id="core_main",
+                    capabilities=["audio", "vision", "automation", "llm"],
+                    gateway_url=f"ws://{self.config.gateway_host}:{self.config.gateway_port}"
                 )
-                self.gateway_client = GatewayClient(
-                    host=self.config.gateway_host,
-                    port=self.config.gateway_port,
-                    token=self.config.gateway_auth_token,
+                
+                # 3. Register Gateway Handlers
+                @self.core_node.on("ui_action")
+                async def handle_ui_action(data):
+                    """Handle UI actions routed via Gateway."""
+                    payload = data.get("payload", {}).get("data", {})
+                    action_type = payload.get("action")
+
+                    # Avoid logging user content / secrets (text_input, orchestrator inputs, etc).
+                    try:
+                        if action_type == "orchestrator_set_input":
+                            logger.info(
+                                "Gateway UI Action: %s (project_id=%s key=%s is_secret=%s)",
+                                action_type,
+                                payload.get("project_id"),
+                                payload.get("key"),
+                                bool(payload.get("is_secret")),
+                            )
+                        else:
+                            logger.info("Gateway UI Action: %s", action_type)
+                    except Exception:
+                        logger.info("Gateway UI Action: %s", action_type)
+
+                    if action_type == "text_input":
+                        text = payload.get("text")
+                        if text:
+                            await self._process_transcript(text, source="ui_gateway")
+                    elif action_type == "push_to_talk":
+                        state = payload.get("state")
+                        if state == "start":
+                            await self.event_bus.publish(Event(type=EventType.PUSH_TO_TALK_START, source="ui_gateway"))
+                        elif state == "stop":
+                            await self.event_bus.publish(Event(type=EventType.PUSH_TO_TALK_STOP, source="ui_gateway"))
+                    elif action_type == "wake_word_status_request":
+                        await self.event_bus.publish(Event(type=EventType.WAKE_WORD_STATUS_REQUEST, source="ui_gateway"))
+                    elif action_type == "wake_word_record_sample":
+                        await self.event_bus.publish(
+                            Event(
+                                type=EventType.WAKE_WORD_RECORD_REQUEST,
+                                data={
+                                    "index": payload.get("index"),
+                                    "kind": payload.get("kind", "positive"),
+                                },
+                                source="ui_gateway",
+                            )
+                        )
+                    elif action_type == "wake_word_train":
+                        await self.event_bus.publish(Event(type=EventType.WAKE_WORD_TRAIN_REQUEST, source="ui_gateway"))
+                    elif action_type == "canvas_action":
+                        try:
+                            from chintu_backend.canvas import get_canvas_manager
+
+                            manager = get_canvas_manager()
+                            action = payload.get("canvas") or payload.get("canvas_action") or payload
+                            if isinstance(action, dict):
+                                manager.apply_action(action)
+                        except Exception as exc:
+                            logger.warning(f"Canvas action failed: {exc}")
+                    elif action_type == "ui_ready":
+                        try:
+                            if self.canvas_manager:
+                                self.canvas_manager.publish()
+                        except Exception:
+                            pass
+                        # Send an initial orchestrator snapshot so the UI can render dashboards immediately.
+                        try:
+                            from chintu_backend.orchestrator import get_orchestrator_manager
+
+                            snapshot = get_orchestrator_manager().get_overview(limit=50)
+                            if self.core_node:
+                                await self.core_node.emit("orchestrator_snapshot", snapshot)
+                        except Exception as exc:
+                            logger.debug(f"Failed to emit orchestrator snapshot: {exc}")
+                    elif action_type == "a2ui_action":
+                        await self.event_bus.publish(
+                            Event(type=EventType.A2UI_ACTION, data=payload, source="ui_gateway")
+                        )
+                    elif action_type == "orchestrator_snapshot_request":
+                        try:
+                            from chintu_backend.orchestrator import get_orchestrator_manager
+
+                            snapshot = get_orchestrator_manager().get_overview(limit=50)
+                            if self.core_node:
+                                await self.core_node.emit("orchestrator_snapshot", snapshot)
+                        except Exception as exc:
+                            logger.debug(f"Failed to emit orchestrator snapshot: {exc}")
+                    elif action_type == "orchestrator_approve_step":
+                        try:
+                            from chintu_backend.orchestrator import get_orchestrator_manager
+
+                            step_id = str(payload.get("step_id") or "").strip()
+                            approve = bool(payload.get("approve", True))
+                            if step_id:
+                                get_orchestrator_manager().approve_step(step_id, approve=approve)
+                            snapshot = get_orchestrator_manager().get_overview(limit=50)
+                            if self.core_node:
+                                await self.core_node.emit("orchestrator_snapshot", snapshot)
+                        except Exception as exc:
+                            logger.debug(f"Orchestrator approve failed: {exc}")
+                    elif action_type == "orchestrator_set_input":
+                        try:
+                            from chintu_backend.orchestrator import get_orchestrator_manager
+
+                            project_id = str(payload.get("project_id") or "").strip() or None
+                            key = str(payload.get("key") or "").strip()
+                            value = str(payload.get("value") or "")
+                            is_secret = bool(payload.get("is_secret", False))
+                            if key:
+                                get_orchestrator_manager().set_input(
+                                    key=key,
+                                    value=value,
+                                    is_secret=is_secret,
+                                    project_id=project_id,
+                                )
+                            snapshot = get_orchestrator_manager().get_overview(limit=50)
+                            if self.core_node:
+                                await self.core_node.emit("orchestrator_snapshot", snapshot)
+                        except Exception as exc:
+                            logger.debug(f"Orchestrator set_input failed: {exc}")
+                    elif action_type in {
+                        "orchestrator_pause_project",
+                        "orchestrator_resume_project",
+                        "orchestrator_cancel_project",
+                    }:
+                        try:
+                            from chintu_backend.orchestrator import get_orchestrator_manager
+
+                            project_id = str(payload.get("project_id") or "").strip()
+                            if project_id:
+                                orch = get_orchestrator_manager()
+                                if action_type == "orchestrator_pause_project":
+                                    orch.pause_project(project_id)
+                                elif action_type == "orchestrator_resume_project":
+                                    orch.resume_project(project_id)
+                                else:
+                                    orch.cancel_project(project_id)
+
+                            snapshot = get_orchestrator_manager().get_overview(limit=50)
+                            if self.core_node:
+                                await self.core_node.emit("orchestrator_snapshot", snapshot)
+                        except Exception as exc:
+                            logger.debug(f"Orchestrator project action failed: {exc}")
+
+                logger.info("Core Node initialized (Gateway Client)")
+                
+                # 4. Initialize State Bridge (Events -> Gateway)
+                from chintu_backend.core.gateway_bridge import GatewayStateBridge
+                self.gateway_bridge = GatewayStateBridge(
+                    core_node=self.core_node,
+                    event_bus=self.event_bus,
+                    state_manager=self.state_manager
                 )
-                logger.info("Gateway server/client initialized")
+                
             except Exception as e:
-                logger.warning(f"Gateway init failed: {e}")
-                self.gateway_server = None
-                self.gateway_client = None
+                logger.warning(f"Gateway integration failed: {e}")
+                self.core_node = None
+                self.gateway_bridge = None
 
         # Optional headless gateway (Telegram) for remote control and alerts
         self.telegram_gateway = None
@@ -219,6 +425,22 @@ class ChintuAssistant:
             logger.info(f"Telegram gateway: {msg}")
         except Exception as e:
             logger.warning(f"Telegram gateway not available: {e}")
+
+        # Optional HTTP Gateway (webhooks + JSON-RPC)
+        self.http_gateway = None
+        if getattr(self.config, "gateway_http_enabled", False):
+            try:
+                from chintu_backend.interfaces.gateway import GatewayServer as HttpGatewayServer
+
+                self.http_gateway = HttpGatewayServer(
+                    self.command_handler,
+                    host=getattr(self.config, "gateway_http_host", "127.0.0.1"),
+                    port=int(getattr(self.config, "gateway_http_port", 18889)),
+                    auth_token=getattr(self.config, "gateway_http_auth_token", None),
+                )
+                logger.info("HTTP Gateway server initialized")
+            except Exception as e:
+                logger.warning(f"HTTP Gateway not available: {e}")
         
         # WebSocket server for Flutter UI
         self.ws_server = WebSocketServer(
@@ -308,18 +530,48 @@ class ChintuAssistant:
 
     def _init_automation(self):
         """Initialize automation components."""
-        from chintu_backend.automation.scheduled_tasks import get_scheduler
+        from chintu_backend.core.scheduler import get_scheduler
         from chintu_backend.automation.parallel_executor import get_parallel_executor
+        from chintu_backend.orchestrator import get_orchestrator_manager
         
         # Connect Scheduler to CommandHandler
         scheduler = get_scheduler()
         scheduler.set_callback(self.command_handler.handle)
         logger.info("Scheduler initialized and connected to CommandHandler")
+
+        # Auto-schedule finance market pulse if configured
+        try:
+            if getattr(self.config, "finance_auto_schedule_pulse", False):
+                existing = [
+                    task for task in scheduler.list_tasks()
+                    if (task.name or "").lower() == "finance daily pulse"
+                ]
+                if not existing:
+                    from chintu_backend.automation.scheduled_tasks import ScheduleType
+
+                    scheduler.start()
+                    scheduler.schedule(
+                        name="Finance Daily Pulse",
+                        workflow="finance news pulse",
+                        schedule_type=ScheduleType.DAILY,
+                        schedule_time=getattr(self.config, "finance_daily_brief_time", "08:00"),
+                    )
+                    logger.info("Scheduled Finance Daily Pulse")
+        except Exception as exc:
+            logger.warning("Failed to auto-schedule finance pulse: %s", exc)
         
         # Connect ParallelExecutor to CommandHandler
         executor = get_parallel_executor()
         executor.set_command_handler(self.command_handler.handle)
         logger.info("ParallelExecutor initialized and connected to CommandHandler")
+
+        # Start Orchestrator (night-time projects, approvals, idle gating)
+        try:
+            orch = get_orchestrator_manager()
+            ok, msg = orch.start()
+            logger.info("Orchestrator: %s", msg)
+        except Exception as exc:
+            logger.warning("Failed to start Orchestrator: %s", exc)
 
         # Initialize Proactivity Engine (Phase 5)
         try:
@@ -347,7 +599,10 @@ class ChintuAssistant:
             sm.update_feature("voice_commands", enabled=False, status="inactive", error="No microphone available")
             sm.update_feature("audio", enabled=False, status="inactive", error="No microphone available")
             sm.update_feature("microphone", enabled=False, status="inactive", error="No microphone available")
-        sm.update_feature("speaker", enabled=True, status="active")
+        speaker_available = False
+        if self.command_handler._tts:
+            speaker_available = self.command_handler._tts.is_available
+        sm.update_feature("speaker", enabled=speaker_available, status="active" if speaker_available else "inactive", error=None if speaker_available else "No audio output detected")
         
         # Hand gestures - starts inactive until explicitly enabled
         sm.update_feature("hand_gestures", enabled=True, status="inactive")
@@ -385,6 +640,16 @@ class ChintuAssistant:
             sm.update_feature("memory_markdown_sync", enabled=True, status="active")
         else:
             sm.update_feature("memory_markdown_sync", enabled=True, status="inactive")
+
+        # Reliability gates
+        if (
+            getattr(self.config, "reliability_gate_enabled", False)
+            or getattr(self.config, "eval_gate_enabled", False)
+            or getattr(self.config, "metrics_gate_enabled", False)
+        ):
+            sm.update_feature("reliability", enabled=True, status="testing")
+        else:
+            sm.update_feature("reliability", enabled=True, status="inactive")
         
         # MCP Tools - check if available
         try:
@@ -431,8 +696,70 @@ class ChintuAssistant:
             sm.update_feature("telegram", enabled=True, status="active")
         else:
             sm.update_feature("telegram", enabled=True, status="inactive")
+
+        # Live Canvas
+        if getattr(self, "canvas_manager", None):
+            sm.update_feature("canvas", enabled=True, status="active")
+        else:
+            sm.update_feature("canvas", enabled=True, status="inactive")
         
         logger.info("Feature statuses initialized")
+
+    def _suppress_library_logs(self):
+        """Mute chatty libraries for professional output."""
+        suppress = [
+            "faster_whisper", "websockets", "pyttsx3", "urllib3", 
+            "requests", "asyncio", "vlc", "pydantic", "matplotlib"
+        ]
+        for lib in suppress:
+            logging.getLogger(lib).setLevel(logging.WARNING)
+        logger.info("Chatty library logs suppressed (level=WARNING)")
+
+    def _start_prewarm_threads(self) -> None:
+        """Warm up local models in the background (best-effort)."""
+        try:
+            cfg = getattr(self, "config", None)
+            if not cfg:
+                return
+            if not (bool(getattr(cfg, "llm_prewarm_enabled", False)) or bool(getattr(cfg, "vision_prewarm_enabled", False))):
+                return
+            if getattr(self, "_prewarm_thread", None):
+                return
+
+            self._prewarm_thread = threading.Thread(target=self._run_prewarm, daemon=True)
+            self._prewarm_thread.start()
+        except Exception:
+            return
+
+    def _run_prewarm(self) -> None:
+        cfg = getattr(self, "config", None)
+        if not cfg:
+            return
+
+        if bool(getattr(cfg, "llm_prewarm_enabled", False)) and hasattr(getattr(self, "llm", None), "prewarm"):
+            try:
+                base_model = str(getattr(cfg, "ollama_model", "") or "").strip()
+                strong_model = str(getattr(cfg, "ollama_model_strong", "") or "").strip()
+                keep_alive = getattr(cfg, "ollama_keep_alive_seconds", None)
+                ok = bool(self.llm.prewarm(model=base_model or None, keep_alive=keep_alive))
+                logger.info("LLM prewarm (model=%s): %s", base_model or getattr(self.llm, "model", "?"), ok)
+
+                if bool(getattr(cfg, "llm_prewarm_include_strong", True)) and strong_model and strong_model != base_model:
+                    ok2 = bool(self.llm.prewarm(model=strong_model, keep_alive=0))
+                    logger.info("Strong LLM prewarm (model=%s): %s", strong_model, ok2)
+            except Exception as exc:
+                logger.warning("LLM prewarm failed: %s", exc)
+
+        if bool(getattr(cfg, "vision_prewarm_enabled", False)):
+            try:
+                from chintu_backend.automation.vision_automation import get_vision_automation
+
+                va = get_vision_automation()
+                if hasattr(va, "prewarm"):
+                    ok = bool(va.prewarm())
+                    logger.info("Vision prewarm (model=%s): %s", getattr(va, "model", "?"), ok)
+            except Exception as exc:
+                logger.warning("Vision prewarm failed: %s", exc)
 
     def _run_startup_health_checks(self):
         """Run v5.1 startup health checks for critical systems."""
@@ -578,7 +905,7 @@ class ChintuAssistant:
         cleaned = re.sub(r"^(hey|hi|hello)\s+chintu\b[, ]*", "", cleaned, flags=re.IGNORECASE)
         return cleaned.strip()
 
-    async def _process_transcript(self, text: str, source: str = "audio"):
+    async def _process_transcript(self, text: str, source: str = "audio", context: Optional[dict] = None):
         from chintu_backend.core import AssistantState
         text = self._strip_wake_phrase(text)
         text_lower = text.strip().lower()
@@ -591,9 +918,17 @@ class ChintuAssistant:
                 return
             text = ""
         
+        # Noise filter: Ignore single non-alphanumeric chars (like '.')
+        if len(text) < 2 and not text.isalnum():
+            logger.debug(f"Ignored noise transcript: '{text}'")
+            self.state_manager.set_assistant_state(AssistantState.IDLE)
+            self.state_manager.set_transcript("", is_final=False)
+            return
+        
         if not text:
             self._wake_cooldown_until = time.time() + self.config.wake_word_cooldown_seconds
             self.state_manager.set_assistant_state(AssistantState.IDLE)
+            self.state_manager.set_assistant_state(AssistantState.IDLE) # Duplicate line removed in cleanup, keeping logic same
             self.state_manager.set_transcript("", is_final=False)
             return
 
@@ -609,7 +944,7 @@ class ChintuAssistant:
             await self._toggle_hand_gestures(False)
             return
 
-        await asyncio.to_thread(self.command_handler.handle, text, source)
+        await asyncio.to_thread(self.command_handler.handle, text, source, context)
 
         if self.config.conversation_mode:
             if self.command_handler._tts:
@@ -640,9 +975,14 @@ class ChintuAssistant:
     async def _startup_sequence(self):
         """Run sequential startup: Greet -> Listen."""
         from chintu_backend.core import AssistantState
-        await self._speak_greeting()
+        
+        # Only greet if speaker is available
+        speaker_available = self.command_handler._tts and self.command_handler._tts.is_available
+        if speaker_available:
+            await self._speak_greeting()
+            
         if self.config.auto_listen_on_connect:
-            if self.audio_capture.is_running:
+            if self.audio_capture.is_running and self.audio_capture.check_hardware_available():
                 self.state_manager.set_assistant_state(AssistantState.LISTENING)
                 self.stt.start_listening()
             else:
@@ -656,6 +996,9 @@ class ChintuAssistant:
         from chintu_backend.brain.memory.preferences import get_preference_manager
 
         if not self.config.tts_greeting_enabled: return
+        if not self.command_handler._tts or not self.command_handler._tts.is_available:
+            logger.info("Skipping voice greeting: TTS not available or no speaker.")
+            return
         
         user_name = None
         try:
@@ -692,12 +1035,82 @@ class ChintuAssistant:
         await asyncio.to_thread(self.command_handler.speak, response)
         self.state_manager.set_assistant_state(AssistantState.IDLE)
 
+    @staticmethod
+    def _compute_calibrated_stt_threshold(
+        levels: list[float],
+        *,
+        base_threshold: float,
+        noise_multiplier: float,
+    ) -> float:
+        """Compute a stable silence threshold from ambient microphone levels."""
+        if not levels:
+            return max(0.0, min(1.0, float(base_threshold)))
+        sorted_levels = sorted(max(0.0, min(1.0, float(v))) for v in levels)
+        n = len(sorted_levels)
+        p70 = sorted_levels[int((n - 1) * 0.70)]
+        p90 = sorted_levels[int((n - 1) * 0.90)]
+        noise_floor = max(p70, p90 * 0.75)
+        candidate = max(float(base_threshold), noise_floor * float(noise_multiplier))
+        return max(0.005, min(0.20, candidate))
+
+    async def _auto_calibrate_stt_noise(self) -> None:
+        """Auto-calibrate STT silence threshold using ambient audio levels."""
+        if not bool(getattr(self.config, "stt_auto_calibrate", False)):
+            return
+        if not self.audio_capture.is_running:
+            return
+
+        calibration_seconds = float(getattr(self.config, "stt_noise_calibration_seconds", 0.8) or 0.8)
+        min_samples = int(getattr(self.config, "stt_noise_calibration_min_samples", 20) or 20)
+        if calibration_seconds <= 0:
+            return
+
+        baseline = len(self._audio_level_history)
+        await asyncio.sleep(calibration_seconds)
+
+        samples = list(self._audio_level_history)[baseline:]
+        if len(samples) < min_samples:
+            # Fall back to latest available ambient window.
+            samples = list(self._audio_level_history)[-min_samples:]
+        if len(samples) < min_samples:
+            logger.info("Skipping STT noise calibration (insufficient samples: %s)", len(samples))
+            return
+
+        new_threshold = self._compute_calibrated_stt_threshold(
+            samples,
+            base_threshold=float(self.config.stt_silence_threshold),
+            noise_multiplier=float(self.config.stt_noise_multiplier),
+        )
+        self.stt.set_silence_threshold(new_threshold)
+        self._stt_noise_calibrated = True
+        logger.info(
+            "STT noise calibration complete: threshold=%.4f (samples=%s, window=%.2fs)",
+            new_threshold,
+            len(samples),
+            calibration_seconds,
+        )
+
     def _setup_callbacks(self):
         """Setup component callbacks."""
         from chintu_backend.core import AssistantState
-        self.audio_capture.set_level_callback(lambda l: self.state_manager.update_audio_level(l))
+        
+        def update_levels(l):
+            try:
+                self._audio_level_history.append(float(l))
+            except Exception:
+                pass
+            self.state_manager.update_audio_level(l)
+            if hasattr(self, 'gateway_bridge') and self.gateway_bridge:
+                self.gateway_bridge.update_audio_level(l)
+                
+        self.audio_capture.set_level_callback(update_levels)
         
         def on_audio_chunk(chunk):
+            # CRITICAL: Block ALL audio processing if typing is active
+            # This prevents STT transcripts from flickering or overwriting UI input
+            if self._typing_active:
+                return
+
             if not self.stt.is_listening:
                 if self.wake_word_process: self.wake_word_process.process_audio(chunk)
                 self.wake_word.process_audio(chunk)
@@ -716,6 +1129,8 @@ class ChintuAssistant:
                 self.stt.start_listening()
             else:
                 self._in_conversation = False
+                # Prevent state change if transcript was just noise/dot (handled in _process_transcript)
+                # But here we ensure AssistantState stays IDLE instead of flashing.
                 self.state_manager.set_assistant_state(AssistantState.IDLE)
 
         self.stt.set_transcript_callback(on_transcript)
@@ -738,6 +1153,16 @@ class ChintuAssistant:
         self.event_bus.subscribe(EventType.WAKE_WORD_DETECTED, lambda e: self._handle_wake_word_detected(source=e.source))
         self.event_bus.subscribe(EventType.UI_CONNECTED, lambda e: self._schedule_coroutine(self._startup_sequence()) if not self._greeting_spoken else None)
         
+        # Typing events (Pause/Resume Wake Word)
+        def on_typing_start(e):
+            self._typing_active = True
+        
+        def on_typing_stop(e):
+            self._typing_active = False
+            
+        self.event_bus.subscribe(EventType.TYPING_START, on_typing_start)
+        self.event_bus.subscribe(EventType.TYPING_STOP, on_typing_stop)
+        
         def on_ptt_start(e):
             if not self.stt.is_listening and self.audio_capture.is_running:
                 self.state_manager.set_assistant_state(AssistantState.LISTENING)
@@ -745,17 +1170,78 @@ class ChintuAssistant:
         
         self.event_bus.subscribe(EventType.PUSH_TO_TALK_START, on_ptt_start)
         self.event_bus.subscribe(EventType.PUSH_TO_TALK_STOP, lambda e: self.stt.stop_listening() if self.stt.is_listening else None)
+        
+        # Connect text input from UI (Missing link fixed)
+        self.event_bus.subscribe(EventType.TRANSCRIPT_READY, lambda e: self._schedule_coroutine(
+            self._process_transcript(
+                e.data.get("text", ""), 
+                source=e.data.get("source", "ui"),
+                context=e.data.get("context")
+            )
+        ))
+
+    def _ensure_gateway_running(self):
+        """Check if Gateway is running, spawn if not."""
+        import socket
+        import subprocess
+        import sys
+        
+        host = self.config.gateway_host
+        port = self.config.gateway_port
+        
+        # Check if port is in use
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        
+        if result == 0:
+            logger.info(f"Gateway already running on {host}:{port}")
+            return
+
+        logger.info(f"Spawning Gateway Server on {host}:{port}...")
+        # Spawn as detatched process
+        cmd = [sys.executable, "-m", "chintu_backend.gateway.server"]
+        try:
+            # Creation flags for independent process on Windows
+            creationflags = 0
+            if sys.platform == "win32":
+                creationflags = subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS if hasattr(subprocess, "DETACHED_PROCESS") else 0
+            
+            self.gateway_server_process = subprocess.Popen(
+                cmd,
+                creationflags=creationflags,
+                close_fds=True
+            )
+            logger.info(f"Gateway spawned (PID: {self.gateway_server_process.pid}). Waiting for startup...")
+            time.sleep(2) # Give it a moment to bind
+        except Exception as e:
+            logger.error(f"Failed to spawn Gateway: {e}")
 
     async def start(self):
         """Start the assistant."""
         self._running = True
         self._loop = asyncio.get_running_loop()
 
-        if self.gateway_server: await self.gateway_server.start()
+        if self.runtime_hardware_adapter and not self._hardware_adapt_task:
+            self._hardware_adapt_task = asyncio.create_task(self._runtime_hardware_adaptation_loop())
+
+        # Phase 1: Connect Core Node to Gateway
+        if self.core_node:
+            asyncio.create_task(self.core_node.connect())
+            # We don't block on this, it runs in background
+        
+        # Legacy/UI
         await self.ws_server.start()
+        if self.http_gateway:
+            await self.http_gateway.start()
         
         self.audio_capture.start()
-        self.wake_word.start()
+        # Only start wake word if audio capture actually identifies hardware
+        if self.audio_capture.is_running:
+            await self._auto_calibrate_stt_noise()
+            self.wake_word.start()
+        else:
+            logger.warning("Wake word detection disabled: No microphone hardware available.")
 
         if self.wake_word_process:
             self.wake_word_process.set_wake_callback(lambda: self._schedule_coroutine(asyncio.to_thread(self._handle_wake_word_detected, "process")))
@@ -770,14 +1256,81 @@ class ChintuAssistant:
     async def stop(self):
         """Stop the assistant."""
         self._running = False
+        if self._hardware_adapt_task:
+            self._hardware_adapt_task.cancel()
+            try:
+                await self._hardware_adapt_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            self._hardware_adapt_task = None
+        
+        if self.core_node:
+            await self.core_node.disconnect()
+            
+        if self.gateway_server_process:
+            logger.info("Stopping Gateway Server subprocess...")
+            self.gateway_server_process.terminate()
+            
         self.audio_capture.stop()
         self.wake_word.stop()
         if self.wake_word_process: self.wake_word_process.stop()
         self.hand_tracker.stop()
         self.event_bus.stop()
         await self.ws_server.stop()
+        if self.http_gateway:
+            await self.http_gateway.stop()
         if self.gateway_server: await self.gateway_server.stop()
         logger.info("Chintu Assistant stopped.")
+
+    async def _runtime_hardware_adaptation_loop(self) -> None:
+        """Periodically refresh hardware topology and re-apply tuning."""
+        if not self.runtime_hardware_adapter:
+            return
+        interval = float(getattr(self.config, "hardware_adapt_check_interval_seconds", 120.0) or 120.0)
+        interval = max(5.0, interval)
+        try:
+            # Prime baseline signature on startup.
+            self.runtime_hardware_adapter.maybe_refresh(force=True)
+        except Exception as exc:
+            logger.warning("Initial runtime hardware adaptation check failed: %s", exc)
+
+        while self._running:
+            try:
+                self.runtime_hardware_adapter.maybe_refresh()
+            except Exception as exc:
+                logger.warning("Runtime hardware adaptation check failed: %s", exc)
+            await asyncio.sleep(interval)
+
+    def _on_runtime_hardware_adapted(self, payload: Optional[dict] = None) -> None:
+        """Apply runtime-tuned config values to active LLM client instances."""
+        try:
+            from chintu_backend.core.runtime_llm_sync import sync_runtime_llm_clients
+
+            targets = [getattr(self, "llm", None)]
+            handler = getattr(self, "command_handler", None)
+            if handler:
+                targets.extend(
+                    [
+                        getattr(handler, "llm", None),
+                        getattr(handler, "local_verifier", None),
+                        getattr(getattr(handler, "router", None), "local_llm", None),
+                        getattr(getattr(handler, "action_dispatcher", None), "llm", None),
+                        getattr(getattr(handler, "conversation_flow", None), "llm", None),
+                        getattr(getattr(handler, "conversation_flow", None), "llm_client", None),
+                        getattr(getattr(handler, "fast_router", None), "llm", None),
+                    ]
+                )
+            receipt = sync_runtime_llm_clients(self.config, targets)
+            if int(receipt.get("changed_targets") or 0) <= 0:
+                return
+            if getattr(self, "state_manager", None):
+                self.state_manager.log_activity(
+                    f"Runtime LLM settings updated for {int(receipt.get('changed_targets') or 0)} client(s)."
+                )
+        except Exception as exc:
+            logger.warning("Runtime LLM sync failed: %s", exc)
 
 
 async def main():

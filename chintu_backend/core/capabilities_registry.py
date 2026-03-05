@@ -3,6 +3,7 @@
 This module documents ALL capabilities Chintu has, organized by category.
 Used for help responses and self-awareness.
 """
+from typing import Dict, Any, List
 
 # Complete list of all Chintu capabilities
 CAPABILITIES = {

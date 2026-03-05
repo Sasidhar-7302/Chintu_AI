@@ -24,6 +24,7 @@ class CommandIntent(str, Enum):
     OPEN = "open"
     SEARCH = "search"
     CREATE = "create"
+    BUILD = "build"  # Triggers Founder agent for projects
     DELETE = "delete"
     SEND = "send"
     PLAY = "play"
@@ -90,7 +91,14 @@ class SmartCommandParser:
             r"\b(what is|who is|where is)\b",
         ],
         CommandIntent.CREATE: [
-            r"\b(create|make|build|generate|write|new)\b",
+            r"\b(create|make)\b",
+            r"\bnew\s+(?:file|folder|project|doc|note|task|todo|list)\b",
+        ],
+        CommandIntent.BUILD: [
+            r"\b(build|develop|ship|deploy|launch|host)\b.*\b(app|application|website|site|product|saas|platform|project|service|dashboard|api)\b",
+            r"\b(app|application|website|site|product|saas|platform|project)\b.*\b(that|which|to)\b",
+            r"\b(passive income|make money|revenue|monetize)\b",
+            r"\b(budget is|budget of|with \$)\b",
         ],
         CommandIntent.DELETE: [
             r"\b(delete|remove|erase|clear|destroy)\b",
@@ -150,6 +158,7 @@ class SmartCommandParser:
         CommandIntent.OPEN: ["target"],
         CommandIntent.SEARCH: ["query"],
         CommandIntent.CREATE: ["what", "type"],
+        CommandIntent.BUILD: [],  # Founder handles clarification
         CommandIntent.SEND: ["to", "content"],
         CommandIntent.SCHEDULE: ["what", "when"],
         CommandIntent.REMIND: ["what", "when"],
@@ -174,7 +183,12 @@ class SmartCommandParser:
         self.validator = get_input_validator()
         self.last_parsed: Optional[ParsedCommand] = None
     
-    def parse(self, text: str) -> ParsedCommand:
+    def parse(
+        self,
+        text: str,
+        context: Optional[Dict[str, Any]] = None,
+        create_pending: bool = True,
+    ) -> ParsedCommand:
         """Parse a user command into structured data.
         
         Args:
@@ -195,7 +209,8 @@ class SmartCommandParser:
         text = text.strip()
         
         # First check if this resolves a pending request
-        handled, msg, result = self.context_manager.process_user_input(text)
+        session_id = (context or {}).get("session_id")
+        handled, msg, result = self.context_manager.process_user_input(text, session_id=session_id)
         if handled:
             return ParsedCommand(
                 original=text,
@@ -212,6 +227,14 @@ class SmartCommandParser:
         
         # Identify target (what to act on)
         target = self._extract_target(text, intent)
+
+        # Fill common fields for schedule/reminder intents
+        if intent in (CommandIntent.REMIND, CommandIntent.SCHEDULE) and target:
+            params.setdefault("what", target)
+        if intent in (CommandIntent.REMIND, CommandIntent.SCHEDULE):
+            when_val = params.get("time") or params.get("date") or params.get("duration")
+            if when_val:
+                params.setdefault("when", when_val)
         
         # Check for missing required info
         missing = self._find_missing_info(intent, params, target)
@@ -233,14 +256,16 @@ class SmartCommandParser:
             parsed.clarification_question = self._generate_clarification(intent, missing[0])
             
             # Create pending request
-            self.context_manager.create_pending_request(
-                request_type=PendingType.MISSING_INFO,
-                prompt=parsed.clarification_question,
-                original_command=text,
-                required_fields=missing,
-                callback_name="continue_task",
-                context={"intent": intent.value, "params": params},
-            )
+            if create_pending:
+                self.context_manager.create_pending_request(
+                    request_type=PendingType.MISSING_INFO,
+                    prompt=parsed.clarification_question,
+                    original_command=text,
+                    required_fields=missing,
+                    callback_name="continue_task",
+                    context={"intent": intent.value, "params": params},
+                    session_id=session_id,
+                )
         
         # Handle low confidence
         if confidence < 0.5:
@@ -299,6 +324,15 @@ class SmartCommandParser:
     def _extract_target(self, text: str, intent: CommandIntent) -> Optional[str]:
         """Extract the target of the action."""
         text_lower = text.lower()
+
+        if intent == CommandIntent.REMIND:
+            match = re.search(r"remind (?:me )?to (.+?)(?: in | at | on | tomorrow| today| next |$)", text_lower)
+            if match:
+                return match.group(1).strip()
+        if intent == CommandIntent.SCHEDULE:
+            match = re.search(r"schedule (.+?)(?: at | on | tomorrow| today| next |$)", text_lower)
+            if match:
+                return match.group(1).strip()
         
         # Remove common intent words to find target
         intent_words = {

@@ -116,7 +116,7 @@ class RobustnessMiddleware:
             self._fallback_system_browser
         )
 
-    def pre_process(self, user_input: str) -> RobustResponse:
+    def pre_process(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> RobustResponse:
         """Pre-process user input before command handling.
         
         Handles:
@@ -132,6 +132,12 @@ class RobustnessMiddleware:
         Returns:
             RobustResponse with processing result
         """
+        context = context or {}
+
+        # Resume replies (e.g. "done, continue channel setup") must not be hijacked
+        # by generic clarification/pending-request logic.
+        resume_waiting_input = bool(context.get("_resume_waiting_input"))
+
         # Handle empty input
         if not user_input or not user_input.strip():
             return RobustResponse(
@@ -145,8 +151,9 @@ class RobustnessMiddleware:
         user_input = user_input.strip()
         
         # Check for pending requests first
-        if self.context_manager.has_pending_requests():
-            handled, message, result = self.context_manager.process_user_input(user_input)
+        session_id = context.get("session_id")
+        if (not resume_waiting_input) and self.context_manager.has_pending_requests(session_id=session_id):
+            handled, message, result = self.context_manager.process_user_input(user_input, session_id=session_id)
             
             if handled:
                 return RobustResponse(
@@ -158,37 +165,27 @@ class RobustnessMiddleware:
                 )
         
         # Parse the command
-        parsed = self.command_parser.parse(user_input)
+        parsed = self.command_parser.parse(user_input, context=context, create_pending=False)
         
         # Check if clarification needed
         if parsed.clarification_needed:
-            return RobustResponse(
-                success=True,
-                message="",
-                original_input=user_input,
-                intent=parsed.intent,
-                needs_followup=True,
-                followup_prompt=parsed.clarification_question,
-                data={"parsed": parsed},
-            )
+            # Only block on missing info for intents that truly require it
+            require_clarification = parsed.intent in {
+                CommandIntent.SEND,
+                CommandIntent.INSTALL,
+            }
+            if require_clarification and not resume_waiting_input:
+                return RobustResponse(
+                    success=True,
+                    message="",
+                    original_input=user_input,
+                    intent=parsed.intent,
+                    needs_followup=True,
+                    followup_prompt=parsed.clarification_question,
+                    data={"parsed": parsed},
+                )
         
-        # Check if low confidence
-        if parsed.confidence < 0.3:
-            suggestions = parsed.suggestions[:3] if parsed.suggestions else []
-            if suggestions:
-                suggestion_text = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(suggestions))
-                prompt = f"I'm not sure what you mean. Did you want to:\n{suggestion_text}"
-            else:
-                prompt = "I didn't understand that. Could you rephrase?"
-            
-            return RobustResponse(
-                success=False,
-                message=prompt,
-                original_input=user_input,
-                intent=CommandIntent.UNKNOWN,
-                needs_followup=True,
-                followup_prompt=prompt,
-            )
+        # Low-confidence parsing should not block execution; let capabilities handle it.
         
         # All good, proceed with processing
         return RobustResponse(

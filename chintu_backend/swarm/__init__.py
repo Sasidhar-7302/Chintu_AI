@@ -16,6 +16,8 @@ from .persistence import (
 from .router import RouterAgent, RouterDecision, RouterIntent
 from .scheduler import ready_tasks
 from .swarm_engine import SwarmEngine, SwarmResult
+from .agent_runtime import AgentRuntime, AgentSessionStore, create_agent_runtime
+from .agent_policy import AgentToolPolicy, AgentSandboxConfig, AgentPolicyProfile, AgentPolicyStore
 from .swarm_integration import SwarmIntegration, get_swarm_integration
 from .vram_monitor import VRAMMonitor, VRAMStatus, VRAMPressure, get_vram_monitor
 from .model_validator import ModelRosterValidator, RosterValidation, get_model_validator
@@ -36,6 +38,13 @@ __all__ = [
     "SwarmResult",
     "SwarmIntegration",
     "get_swarm_integration",
+    "AgentRuntime",
+    "AgentSessionStore",
+    "create_agent_runtime",
+    "AgentToolPolicy",
+    "AgentSandboxConfig",
+    "AgentPolicyProfile",
+    "AgentPolicyStore",
     "Task",
     "TaskCreate",
     "TaskStatus",

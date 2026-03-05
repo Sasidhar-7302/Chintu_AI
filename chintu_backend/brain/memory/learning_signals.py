@@ -81,14 +81,136 @@ class LearningSignalManager:
             "serious": "serious",
             "formal": "formal"
         }
+        # Avoid turning one-off creative directives (e.g. "make it funny")
+        # into global preference changes when the user is asking for content.
+        is_content_generation_request = (
+            any(term in text for term in ("generate", "write", "create", "draft", "script"))
+            and any(
+                noun in text
+                for noun in ("youtube", "short", "story", "blog", "caption", "post", "script")
+            )
+        )
         
-        for key, style in style_map.items():
-            if f"be {key}" in text or f"make it {key}" in text or f"keep it {key}" in text:
-                signals.append(LearningSignal(
-                    signal_type="preference",
-                    content=f"User wants response style: {style}",
-                    confidence=0.9,
-                ))
+        if not is_content_generation_request:
+            for key, style in style_map.items():
+                if f"be {key}" in text or f"make it {key}" in text or f"keep it {key}" in text:
+                    action = None
+                    if style in ("concise", "detailed", "balanced"):
+                        action = {"type": "set_preference", "key": "response_style", "value": style}
+                    elif style == "humorous":
+                        action = {"type": "set_preference", "key": "use_humor", "value": True}
+                    elif style == "serious":
+                        action = {"type": "set_preference", "key": "use_humor", "value": False}
+                    elif style == "formal":
+                        action = {"type": "set_preference", "key": "tone_style", "value": "formal"}
+                    signals.append(LearningSignal(
+                        signal_type="preference",
+                        content=f"User wants response style: {style}",
+                        confidence=0.9,
+                        proposed_action=action or {"type": "set_preference", "key": "response_style", "value": "balanced"}
+                    ))
+
+        # 3.1 Tone & Empathy
+        if "more empathetic" in text or "be empathetic" in text or "empathy" in text:
+            signals.append(LearningSignal(
+                signal_type="preference",
+                content="User wants more empathy",
+                confidence=0.9,
+                proposed_action={"type": "set_preference", "key": "empathy_level", "value": "high"}
+            ))
+        if "less empathetic" in text or "not so empathetic" in text or "less emotion" in text:
+            signals.append(LearningSignal(
+                signal_type="preference",
+                content="User wants less empathy",
+                confidence=0.9,
+                proposed_action={"type": "set_preference", "key": "empathy_level", "value": "low"}
+            ))
+        if "be direct" in text or "more direct" in text or "be blunt" in text:
+            signals.append(LearningSignal(
+                signal_type="preference",
+                content="User wants more direct responses",
+                confidence=0.9,
+                proposed_action={"type": "set_preference", "key": "directness", "value": "high"}
+            ))
+        if "be gentle" in text or "softer" in text:
+            signals.append(LearningSignal(
+                signal_type="preference",
+                content="User wants gentler responses",
+                confidence=0.9,
+                proposed_action={"type": "set_preference", "key": "directness", "value": "low"}
+            ))
+        if "formal tone" in text or "professional tone" in text or "be formal" in text:
+            signals.append(LearningSignal(
+                signal_type="preference",
+                content="User wants a formal tone",
+                confidence=0.85,
+                proposed_action={"type": "set_preference", "key": "tone_style", "value": "formal"}
+            ))
+        if "casual" in text or "warm tone" in text:
+            signals.append(LearningSignal(
+                signal_type="preference",
+                content="User wants a casual tone",
+                confidence=0.85,
+                proposed_action={"type": "set_preference", "key": "tone_style", "value": "warm"}
+            ))
+
+        # 3.2 Busy mode
+        if "i'm busy" in text or "im busy" in text or "busy mode" in text:
+            signals.append(LearningSignal(
+                signal_type="preference",
+                content="User is busy and wants brief responses",
+                confidence=0.85,
+                proposed_action={"type": "set_preference", "key": "busy_mode", "value": True}
+            ))
+        if "not busy" in text or "exit busy mode" in text:
+            signals.append(LearningSignal(
+                signal_type="preference",
+                content="User wants to exit busy mode",
+                confidence=0.8,
+                proposed_action={"type": "set_preference", "key": "busy_mode", "value": False}
+            ))
+
+        # 3.3 Role preferences - Require explicit role invocation to avoid false positives
+        role_patterns = [
+            (r"act (?:as|like) (?:a |an |my )?(\w+)", None),  # "act as my buddy"
+            (r"be (?:my |a |an )?(\w+)", None),  # "be my advisor"
+            (r"you are (?:my |a |an )?(\w+)", None),  # "you are my cofounder"
+            (r"talk to me (?:like|as) (?:a |an |my )?(\w+)", None),  # "talk to me like a friend"
+        ]
+        role_map = {
+            "cofounder": "cofounder", "co-founder": "cofounder",
+            "manager": "manager", "assistant": "assistant",
+            "buddy": "buddy", "friend": "buddy",
+            "advisor": "advisor",
+        }
+        for pattern, _ in role_patterns:
+            match = re.search(pattern, text)
+            if match:
+                role_word = match.group(1).lower()
+                if role_word in role_map:
+                    signals.append(LearningSignal(
+                        signal_type="preference",
+                        content=f"User wants role: {role_map[role_word]}",
+                        confidence=0.8,
+                        proposed_action={"type": "set_preference", "key": "behavior_role", "value": role_map[role_word]}
+                    ))
+                    break
+
+        # 3.4 Entrepreneurial mode
+        if "entrepreneur" in text or "entrepreneurial" in text or "think like a founder" in text:
+            signals.append(LearningSignal(
+                signal_type="preference",
+                content="User wants entrepreneurial mode",
+                confidence=0.8,
+                proposed_action={"type": "set_preference", "key": "entrepreneurial_mode", "value": True}
+            ))
+        if "standard mode" in text:
+            signals.append(LearningSignal(
+                signal_type="preference",
+                content="User wants standard mode",
+                confidence=0.8,
+                proposed_action={"type": "set_preference", "key": "entrepreneurial_mode", "value": False}
+            ))
                 
         # 4. Content Feedback (News/Topics)
         # "That news was boring", "I like tech news", "Not interested in politics"
@@ -162,9 +284,14 @@ class LearningSignalManager:
         Process a signal and return a proposal string for the user.
         Actual update happens only after user confirmation (handled by CommandHandler).
         """
-        if signal.proposed_action["type"] == "update_style":
-            return f"I've noticed you prefer {signal.proposed_action['value']} responses. Should I save that as your default preference?"
-            
+        action = signal.proposed_action or {}
+        action_type = action.get("type")
+        if action_type == "set_preference":
+            key = action.get("key", "preference")
+            value = action.get("value")
+            return f"I can set {key} to '{value}'. Should I save this as your default?"
+        if action_type == "update_style":
+            return f"I've noticed you prefer {action.get('value')} responses. Should I save that as your default preference?"
         return f"I detected a preference: '{signal.content}'. Should I remember this for next time?"
 
 # Global instance

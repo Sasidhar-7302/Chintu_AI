@@ -1,0 +1,9 @@
+name: finance-readonly-pack
+description: "Cofounder workflow pack: read-only finance summary + manual execution checklist."
+args:
+  portfolio:
+    default: "core_portfolio"
+steps:
+  - id: execute
+    command: "shell:python scripts/workflow_packs/finance_readonly_pack.py --portfolio ${portfolio}"
+

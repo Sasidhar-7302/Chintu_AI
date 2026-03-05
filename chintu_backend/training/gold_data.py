@@ -114,7 +114,9 @@ class GoldDataManager:
                         assistant_response: str,
                         capability_used: Optional[str] = None,
                         model_used: Optional[str] = None,
-                        tags: Optional[List[str]] = None):
+                        tags: Optional[List[str]] = None,
+                        approved: bool = False,
+                        rating: Optional[int] = None):
         """
         Log a new interaction for potential approval.
         
@@ -133,8 +135,13 @@ class GoldDataManager:
             model_used=model_used,
             tags=tags or []
         )
-        
-        self._write_jsonl(self._pending_file, asdict(interaction))
+        if approved:
+            interaction.is_approved = True
+            interaction.approval_timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            interaction.rating = int(rating if rating is not None else 4)
+            self._write_jsonl(self._approved_file, asdict(interaction))
+        else:
+            self._write_jsonl(self._pending_file, asdict(interaction))
         logger.debug(f"Logged interaction: {user_input[:50]}...")
     
     def get_pending(self, limit: int = 20, offset: int = 0) -> List[Interaction]:

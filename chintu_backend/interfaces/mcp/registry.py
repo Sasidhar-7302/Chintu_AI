@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import shlex
+import sys
 import time
+from fnmatch import fnmatch
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -115,13 +117,17 @@ class McpRegistry:
             )
 
     def _iter_specs(self) -> Iterable[McpServerSpec]:
+        specs: List[McpServerSpec] = []
+
         # Docker MCP server is treated as a first-class MCP provider.
         if self.config.mcp_docker_enabled:
-            yield McpServerSpec(
+            specs.append(
+                McpServerSpec(
                 name="docker",
                 command=self.config.mcp_docker_command,
                 args=list(self.config.mcp_docker_args),
                 enabled=True,
+                )
             )
 
         for idx, command_str in enumerate(self.config.mcp_servers):
@@ -135,7 +141,28 @@ class McpRegistry:
             # Make the name stable and readable.
             base_name = name.split("/")[-1].split("\\")[-1]
             spec_name = f"{base_name}_{idx + 1}"
-            yield McpServerSpec(name=spec_name, command=parts[0], args=parts[1:], enabled=True)
+            if self.config.mcp_server_allowlist:
+                if not any(fnmatch(spec_name, pattern) for pattern in self.config.mcp_server_allowlist):
+                    continue
+            specs.append(McpServerSpec(name=spec_name, command=parts[0], args=parts[1:], enabled=True))
+
+        # Phase 12 default: if MCP is enabled but no servers are configured,
+        # expose Chintu's built-in MCP server so the tool bus is always usable.
+        if self.config.mcp_enabled and not specs:
+            default_spec = McpServerSpec(
+                name="chintu_builtin",
+                command=sys.executable,
+                args=["-m", "chintu_backend.interfaces.mcp.server"],
+                enabled=True,
+            )
+            if self.config.mcp_server_allowlist:
+                if any(fnmatch(default_spec.name, pattern) for pattern in self.config.mcp_server_allowlist):
+                    specs.append(default_spec)
+            else:
+                specs.append(default_spec)
+
+        for spec in specs:
+            yield spec
 
     @property
     def is_enabled(self) -> bool:
@@ -196,6 +223,7 @@ class McpRegistry:
                 tools.extend(client.list_tools(refresh=refresh))
             except Exception as exc:  # noqa: BLE001
                 logger.debug("MCP tools/list failed for %s: %s", name, exc)
+        tools = [t for t in tools if self._tool_allowed(t.name)]
         if tools:
             self.state_manager.update_feature("mcp", enabled=True, status="active")
         return tools
@@ -233,6 +261,8 @@ class McpRegistry:
             return False, "Tool name is required", None
         if not self._started:
             self.start()
+        if not self._tool_allowed(tool_name):
+            return False, f"MCP tool blocked by policy: {tool_name}", None
 
         client, resolved_name = self._resolve_tool(tool_name, server_name=server_name)
         if not client or not resolved_name:
@@ -246,6 +276,17 @@ class McpRegistry:
             logger.warning("MCP tool call failed (%s): %s", tool_name, exc)
             self.state_manager.update_feature("mcp", status="testing", error=str(exc))
             return False, f"MCP tool call failed: {exc}", None
+
+    def _tool_allowed(self, tool_name: str) -> bool:
+        name = (tool_name or "").lower()
+        deny = [d.lower() for d in (self.config.mcp_tool_denylist or [])]
+        allow = [a.lower() for a in (self.config.mcp_tool_allowlist or [])]
+        for pattern in deny:
+            if fnmatch(name, pattern):
+                return False
+        if allow:
+            return any(fnmatch(name, pattern) for pattern in allow)
+        return True
 
     @staticmethod
     def parse_arguments(raw: str) -> Dict[str, Any]:

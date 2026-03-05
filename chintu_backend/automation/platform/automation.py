@@ -80,7 +80,7 @@ class WindowsAutomation(PlatformAutomation):
             app_exe = apps.get(app_name.lower(), app_name)
             
             # Launch app
-            subprocess.Popen(app_exe, shell=True)
+            subprocess.Popen([app_exe], shell=False)
             return True
         
         except Exception as e:
@@ -195,7 +195,7 @@ class LinuxAutomation(PlatformAutomation):
             }
             
             app_cmd = apps.get(app_name.lower(), app_name)
-            subprocess.Popen([app_cmd], shell=True)
+            subprocess.Popen([app_cmd], shell=False)
             return True
         
         except Exception as e:

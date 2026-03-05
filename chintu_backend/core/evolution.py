@@ -27,18 +27,25 @@ class EvolutionManager:
             return "Security Error: Cannot modify files outside Chintu directory."
             
         try:
-            with open(abs_path, "r", encoding="utf-8") as f:
-                old_content = f.read()
+            if os.path.exists(abs_path):
+                with open(abs_path, "r", encoding="utf-8") as f:
+                    old_content = f.read()
+            else:
+                old_content = "" # New file creation
                 
-            # Generate Diff
+            # Generate Git-compatible Diff
             diff = difflib.unified_diff(
                 old_content.splitlines(),
                 new_content.splitlines(),
-                fromfile=f"Current: {file_path}",
-                tofile=f"Proposed: {file_path}",
+                fromfile=f"a/{file_path}",
+                tofile=f"b/{file_path}",
                 lineterm=""
             )
-            diff_text = "\n".join(diff)
+            diff_list = list(diff)
+            if not diff_list:
+                return "No changes detected."
+            
+            diff_text = "\n".join(diff_list) + "\n"
             
             # Save Proposal
             proposal_id = f"patch_{int(os.times().elapsed)}"
@@ -58,13 +65,40 @@ class EvolutionManager:
 
     def apply_patch(self, patch_id: str) -> bool:
         """
-        Apply a previously proposed patch.
+        Apply a previously proposed patch using git apply.
         WARNING: This modifies source code!
         """
-        # Implementation left stubbed for safety until User explicitly enables "Auto-Apply"
-        logger.warning(f"Apply Patch {patch_id} requested. Logic stubbed for safety.")
-        # Real implementation would use `git apply` or manual file overwrite.
-        return True
+        import subprocess
+        
+        proposal_path = os.path.join(self.root_dir, "brain_md", "evolution", f"{patch_id}.patch")
+        if not os.path.exists(proposal_path):
+            logger.error(f"Patch file not found: {proposal_path}")
+            return False
+            
+        try:
+            # We use git apply --ignore-space-change --ignore-whitespace
+            # First, check if the patch can be applied
+            check_cmd = ["git", "apply", "--check", proposal_path]
+            result = subprocess.run(check_cmd, capture_output=True, text=True, cwd=self.root_dir)
+            
+            if result.returncode != 0:
+                logger.error(f"Patch check failed for {patch_id}: {result.stderr}")
+                return False
+                
+            # Actually apply the patch
+            apply_cmd = ["git", "apply", proposal_path]
+            result = subprocess.run(apply_cmd, capture_output=True, text=True, cwd=self.root_dir)
+            
+            if result.returncode == 0:
+                logger.info(f"🧬 Evolution Patch Applied: {patch_id}")
+                return True
+            else:
+                logger.error(f"Failed to apply patch {patch_id}: {result.stderr}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error applying patch {patch_id}: {e}")
+            return False
 
 # Global
 _evolution = None

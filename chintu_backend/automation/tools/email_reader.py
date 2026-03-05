@@ -155,6 +155,27 @@ class EmailReader:
         client.select(str(self.config.email_imap_folder or "INBOX"))
         return client
 
+    def test_connection(self) -> tuple[bool, str]:
+        """Best-effort IMAP connectivity check (no message bodies read)."""
+        ok, reason = self.configured
+        if not ok:
+            return False, reason
+        try:
+            client = self._connect()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Email connection failed: {exc}"
+        try:
+            typ, data = client.uid("search", None, "UNSEEN")
+            unseen = 0
+            if typ == "OK" and data and data[0]:
+                unseen = len(data[0].decode("utf-8", errors="ignore").split())
+            return True, f"IMAP connection OK. Unread messages: {unseen}."
+        finally:
+            try:
+                client.logout()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _scan_uids(self, client: imaplib.IMAP4_SSL, limit: int) -> List[str]:
         typ, data = client.uid("search", None, "ALL")
         if typ != "OK" or not data or not data[0]:

@@ -99,6 +99,7 @@ class OrchestratorStore:
                     required_inputs_json TEXT NOT NULL DEFAULT '[]',
                     risk_level TEXT NOT NULL DEFAULT 'low',
                     status TEXT NOT NULL,
+                    assigned_agent TEXT,
                     attempts INTEGER NOT NULL DEFAULT 0,
                     max_attempts INTEGER NOT NULL DEFAULT 2,
                     last_run_at TEXT,
@@ -165,6 +166,13 @@ class OrchestratorStore:
                 )
                 """
             )
+            # Lightweight migrations for newly added columns.
+            try:
+                columns = {row["name"] for row in conn.execute("PRAGMA table_info(steps)").fetchall()}
+                if "assigned_agent" not in columns:
+                    conn.execute("ALTER TABLE steps ADD COLUMN assigned_agent TEXT")
+            except Exception:
+                pass
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -283,11 +291,11 @@ class OrchestratorStore:
                     """
                     INSERT INTO steps (
                         id, project_id, order_index, title, command, capability,
-                        depends_on_json, required_inputs_json, risk_level, status,
+                        depends_on_json, required_inputs_json, risk_level, status, assigned_agent,
                         attempts, max_attempts, last_run_at, next_eligible_at,
                         last_error, estimated_minutes, auto_retry, approval_required
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, NULL, '', ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, NULL, '', ?, ?, ?)
                     """,
                     (
                         step_id,
@@ -300,6 +308,7 @@ class OrchestratorStore:
                         _dumps(spec.get("required_inputs") or []),
                         (spec.get("risk_level") or "low"),
                         StepStatus.PENDING.value,
+                        (spec.get("assigned_agent") or None),
                         int(spec.get("max_attempts") or 2),
                         int(spec.get("estimated_minutes") or 10),
                         1 if bool(spec.get("auto_retry", True)) else 0,
@@ -335,6 +344,7 @@ class OrchestratorStore:
             "required_inputs_json",
             "risk_level",
             "status",
+            "assigned_agent",
             "attempts",
             "max_attempts",
             "last_run_at",
@@ -682,6 +692,7 @@ class OrchestratorStore:
             required_inputs=_loads(row["required_inputs_json"], []),
             risk_level=str(row["risk_level"] or "low"),
             status=StepStatus(str(row["status"])),
+            assigned_agent=str(row["assigned_agent"]) if row["assigned_agent"] else None,
             attempts=int(row["attempts"] or 0),
             max_attempts=int(row["max_attempts"] or 2),
             last_run_at=_parse_dt(row["last_run_at"]),

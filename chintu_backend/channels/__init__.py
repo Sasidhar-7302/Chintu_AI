@@ -2,6 +2,9 @@
 
 from .policy import ChannelPolicyManager
 from .telegram import TelegramGateway, get_telegram_gateway
+from .slack import SlackGateway
+from .discord import DiscordGateway
+from .relay import RelayGateway
 
 try:
     from .whatsapp import WhatsAppGateway
@@ -13,4 +16,7 @@ __all__ = [
     "TelegramGateway",
     "get_telegram_gateway",
     "WhatsAppGateway",
+    "SlackGateway",
+    "DiscordGateway",
+    "RelayGateway",
 ]

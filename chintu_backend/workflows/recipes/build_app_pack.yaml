@@ -1,0 +1,9 @@
+name: build-app-pack
+description: "Cofounder workflow pack: idea to PRD/architecture/milestones artifacts."
+args:
+  project:
+    default: "sample_app"
+steps:
+  - id: execute
+    command: "shell:python scripts/workflow_packs/build_app_pack.py --project ${project}"
+

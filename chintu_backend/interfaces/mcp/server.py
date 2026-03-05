@@ -33,11 +33,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Add project root to path
-project_root = Path(__file__).parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import (
@@ -275,6 +270,48 @@ async def list_tools() -> List[Tool]:
                     "pattern": {"type": "string", "default": "*"},
                 },
                 "required": ["path"],
+            },
+        ),
+        Tool(
+            name="repo_index",
+            description="Build or refresh the incremental repository index",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional repository/workspace path (defaults to current directory)",
+                    },
+                    "incremental": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When false, performs a full rebuild",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="repo_search",
+            description="Search indexed repository chunks",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "k": {"type": "integer", "default": 8, "description": "Max results to return"},
+                    "path": {
+                        "type": "string",
+                        "description": "Optional repository/workspace path (defaults to current directory)",
+                    },
+                    "path_prefix": {
+                        "type": "string",
+                        "description": "Optional relative path prefix filter",
+                    },
+                    "ext": {
+                        "type": "string",
+                        "description": "Optional file extension filter like .py or md",
+                    },
+                },
+                "required": ["query"],
             },
         ),
         
@@ -517,6 +554,44 @@ async def _execute_tool(name: str, args: Dict[str, Any]) -> str:
             size = f.stat().st_size if f.is_file() else "dir"
             lines.append(f"- {f.name} ({size})")
         return "\n".join(lines)
+
+    if name == "repo_index":
+        from chintu_backend.coding.repo_indexer import RepoIndexer
+
+        target = Path(args.get("path") or Path.cwd()).expanduser().resolve()
+        if not target.exists() or not target.is_dir():
+            return f"Directory not found: {target}"
+        incremental = bool(args.get("incremental", True))
+        indexer = RepoIndexer(root_path=target)
+        stats = indexer.build(incremental=incremental)
+        return json.dumps(stats, indent=2, ensure_ascii=True)
+
+    if name == "repo_search":
+        from chintu_backend.coding.repo_indexer import RepoIndexer
+
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return "Missing required argument: query"
+        target = Path(args.get("path") or Path.cwd()).expanduser().resolve()
+        if not target.exists() or not target.is_dir():
+            return f"Directory not found: {target}"
+        k = int(args.get("k", 8) or 8)
+        path_prefix = args.get("path_prefix")
+        ext = args.get("ext")
+        indexer = RepoIndexer(root_path=target)
+        rows = indexer.search(
+            query=query,
+            k=k,
+            path_prefix=str(path_prefix) if path_prefix is not None else None,
+            ext=str(ext) if ext is not None else None,
+        )
+        payload = {
+            "query": query,
+            "k": max(1, int(k)),
+            "count": len(rows),
+            "results": rows,
+        }
+        return json.dumps(payload, indent=2, ensure_ascii=True)
     
     # App control
     if name == "app_launch":

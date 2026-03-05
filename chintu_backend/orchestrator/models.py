@@ -62,6 +62,7 @@ class OrchestratorStep:
     required_inputs: List[str] = field(default_factory=list)
     risk_level: str = "low"
     status: StepStatus = StepStatus.PENDING
+    assigned_agent: Optional[str] = None
     attempts: int = 0
     max_attempts: int = 2
     last_run_at: Optional[datetime] = None

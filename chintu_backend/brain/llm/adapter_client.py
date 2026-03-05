@@ -90,6 +90,40 @@ class AdapterLLMClient:
     def generate_stream(self, prompt: str, system_prompt: Optional[str] = None):
         yield self.generate(prompt, system_prompt)
 
+    def answer_question(self, question: str) -> str:
+        system = "You are Chintu, a helpful personal AI assistant. Be concise but thorough."
+        return self.generate(question, system)
+
+    def draft_resume(self, role: str, experience_years: int = 5, skills: Optional[list] = None) -> str:
+        skills_str = ", ".join(skills) if skills else "relevant skills"
+        prompt = (
+            f"Draft a professional resume for a {role} with {experience_years} years of experience. "
+            f"Include sections for Summary, Experience, Skills ({skills_str}), Education."
+        )
+        system = "You are a professional resume writer. Create ATS-friendly, achievement-focused resumes."
+        return self.generate(prompt, system)
+
+    def draft_sop(self, program: str, university: Optional[str] = None) -> str:
+        uni_str = f" at {university}" if university else ""
+        prompt = (
+            f"Write a compelling Statement of Purpose for applying to a {program} program{uni_str}. "
+            "Include motivation, relevant experience, and future goals."
+        )
+        system = "You are an expert in graduate applications. Write compelling and genuine statements."
+        return self.generate(prompt, system)
+
+    def draft_email(self, purpose: str, recipient: Optional[str] = None) -> str:
+        to_str = f" to {recipient}" if recipient else ""
+        prompt = f"Write a concise professional email{to_str} for: {purpose}"
+        system = "You are a professional communication assistant."
+        return self.generate(prompt, system)
+
+    def generate_content(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+        return self.generate(prompt, system_instruction)
+
+    def chat(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+        return self.generate(prompt, system_prompt)
+
     def _build_prompt(self, prompt: str, system_prompt: Optional[str]) -> str:
         if hasattr(self._tokenizer, "apply_chat_template"):
             messages = []

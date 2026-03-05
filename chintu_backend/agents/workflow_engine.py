@@ -184,7 +184,7 @@ class WorkflowEngine:
     
     def _execute_browse(self, step: Step) -> str:
         """Execute a browse step."""
-        from ..browser.browser_controller import get_browser_controller
+        from ..automation.browser.browser_controller import get_browser_controller
         
         url = step.parameters.get("url", "")
         if not url:
@@ -196,7 +196,7 @@ class WorkflowEngine:
     
     def _execute_click(self, step: Step) -> str:
         """Execute a click step."""
-        from ..browser.browser_controller import get_browser_controller
+        from ..automation.browser.browser_controller import get_browser_controller
         
         text = step.parameters.get("text", "")
         selector = step.parameters.get("selector", "")
@@ -214,7 +214,7 @@ class WorkflowEngine:
     
     def _execute_fill(self, step: Step) -> str:
         """Execute a fill step."""
-        from ..browser.browser_controller import get_browser_controller
+        from ..automation.browser.browser_controller import get_browser_controller
         
         selector = step.parameters.get("selector", "")
         value = step.parameters.get("value", "")
@@ -232,7 +232,7 @@ class WorkflowEngine:
     
     def _execute_screenshot(self, step: Step) -> str:
         """Execute a screenshot step."""
-        from ..browser.browser_controller import get_browser_controller
+        from ..automation.browser.browser_controller import get_browser_controller
         
         filename = step.parameters.get("filename")
         controller = get_browser_controller()
@@ -241,7 +241,7 @@ class WorkflowEngine:
     
     def _execute_read(self, step: Step) -> str:
         """Execute a read page step."""
-        from ..browser.browser_controller import get_browser_controller
+        from ..automation.browser.browser_controller import get_browser_controller
         
         controller = get_browser_controller()
         if not controller.is_open:
@@ -252,7 +252,7 @@ class WorkflowEngine:
     
     def _execute_extract(self, step: Step) -> str:
         """Execute an extract step."""
-        from ..browser.browser_controller import get_browser_controller
+        from ..automation.browser.browser_controller import get_browser_controller
         
         selector = step.parameters.get("selector", "body")
         controller = get_browser_controller()

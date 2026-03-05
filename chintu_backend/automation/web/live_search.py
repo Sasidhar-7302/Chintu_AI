@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 
 # DuckDuckGo search
 try:
+    import warnings
+    # Suppress the "renamed to ddgs" warning
+    warnings.filterwarnings("ignore", message="This package .* renamed to ddgs")
     from duckduckgo_search import DDGS
     HAS_DDGS = True
 except ImportError:
@@ -88,7 +91,13 @@ class LiveSearch:
             logger.error(f"Search failed: {e}")
             return []
     
-    def search_news(self, query: str, max_results: Optional[int] = None) -> List[Dict[str, Any]]:
+    def search_news(
+        self,
+        query: str,
+        max_results: Optional[int] = None,
+        timelimit: Optional[str] = None,
+        region: str = "us-en",
+    ) -> List[Dict[str, Any]]:
         """
         Search for news articles.
         
@@ -106,7 +115,12 @@ class LiveSearch:
         
         try:
             with DDGS() as ddgs:
-                results = list(ddgs.news(query, max_results=max_results))
+                results = list(ddgs.news(
+                    query,
+                    max_results=max_results,
+                    timelimit=timelimit,
+                    region=region,
+                ))
                 
             formatted = []
             for r in results:

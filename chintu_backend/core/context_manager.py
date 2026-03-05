@@ -63,6 +63,7 @@ class PendingRequest:
     callback_name: Optional[str] = None      # Function to call when resolved
     retry_count: int = 0
     max_retries: int = 3
+    session_id: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -180,6 +181,40 @@ class ConversationContextManager:
         self.callbacks["store_credential"] = self._store_credential
         self.callbacks["apply_config"] = self._apply_config
         self.callbacks["close_app_choice"] = self._close_app_choice
+        self.callbacks["apply_preference"] = self._apply_preference
+        self.callbacks["news_detail_choice"] = self._news_detail_choice
+
+    def _apply_preference(self, request: PendingRequest) -> str:
+        """Apply a pending preference update after user approval."""
+        try:
+            from chintu_backend.brain.memory.preferences import get_preference_manager
+            pref_manager = get_preference_manager()
+        except Exception as exc:
+            logger.error("Preference manager unavailable: %s", exc)
+            return "I couldn't access preferences to apply that change."
+
+        updates = request.context.get("updates")
+        if isinstance(updates, dict) and updates:
+            try:
+                pref_manager.update(**updates)
+                keys = ", ".join(sorted(updates.keys()))
+                return f"Preferences updated: {keys}."
+            except Exception as exc:
+                logger.error("Preference update failed: %s", exc)
+                return "I couldn't apply those preference updates."
+
+        key = request.context.get("preference_key") or request.context.get("key")
+        value = request.context.get("preference_value")
+        if not key:
+            return "I couldn't find which preference to update."
+        try:
+            ok = pref_manager.set(key, value)
+            if ok:
+                return f"Preference saved: {key} = {value}."
+            return "That preference key isn't recognized yet."
+        except Exception as exc:
+            logger.error("Preference apply failed: %s", exc)
+            return "I couldn't apply that preference."
 
     def _generate_id(self) -> str:
         """Generate unique request ID."""
@@ -198,6 +233,7 @@ class ConversationContextManager:
         context: Optional[Dict[str, Any]] = None,
         callback_name: Optional[str] = None,
         expires_minutes: int = 60,
+        session_id: Optional[str] = None,
     ) -> PendingRequest:
         """Create a new pending request.
         
@@ -226,6 +262,7 @@ class ConversationContextManager:
                 context=context or {},
                 callback_name=callback_name,
                 expires_at=expires_at,
+                session_id=session_id,
             )
             
             self.pending_requests[req_id] = request
@@ -234,20 +271,25 @@ class ConversationContextManager:
             logger.info("Created pending request: %s (%s)", req_id, request_type.value)
             return request
 
-    def has_pending_requests(self) -> bool:
-        """Check if there are any pending requests."""
+    def has_pending_requests(self, session_id: Optional[str] = None) -> bool:
+        """Check if there are any pending requests matching exact session_id."""
         self._cleanup_expired()
-        return any(
-            r.status == RequestStatus.PENDING 
-            for r in self.pending_requests.values()
-        )
+        for r in self.pending_requests.values():
+            if r.status != RequestStatus.PENDING:
+                continue
+            # FIX: Exact match only (None matches None, "abc" matches "abc")
+            if r.session_id != session_id:
+                continue
+            return True
+        return False
 
-    def get_pending_prompt(self) -> Optional[str]:
-        """Get the prompt for the oldest pending request."""
+    def get_pending_prompt(self, session_id: Optional[str] = None) -> Optional[str]:
+        """Get the prompt for the oldest pending request matching exact session_id."""
         self._cleanup_expired()
         pending = [
-            r for r in self.pending_requests.values() 
+            r for r in self.pending_requests.values()
             if r.status == RequestStatus.PENDING
+            and r.session_id == session_id  # FIX: Exact match only
         ]
         if pending:
             # Sort by created_at, oldest first
@@ -255,22 +297,24 @@ class ConversationContextManager:
             return pending[0].prompt
         return None
 
-    def get_pending_request(self, req_id: Optional[str] = None) -> Optional[PendingRequest]:
-        """Get a pending request by ID, or the oldest pending one."""
+    def get_pending_request(self, req_id: Optional[str] = None, session_id: Optional[str] = None) -> Optional[PendingRequest]:
+        """Get a pending request by ID, or the oldest pending one (optionally scoped to a session)."""
         self._cleanup_expired()
         if req_id:
             return self.pending_requests.get(req_id)
         
+        # FIX: Require EXACT session_id match (None matches None, not all)
         pending = [
-            r for r in self.pending_requests.values() 
+            r for r in self.pending_requests.values()
             if r.status == RequestStatus.PENDING
+            and r.session_id == session_id  # Exact match, not wildcard
         ]
         if pending:
             pending.sort(key=lambda x: x.created_at)
             return pending[0]
         return None
 
-    def process_user_input(self, user_input: str) -> Tuple[bool, Optional[str], Optional[Dict]]:
+    def process_user_input(self, user_input: str, session_id: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """Process user input and check if it resolves pending requests.
         
         Args:
@@ -283,7 +327,7 @@ class ConversationContextManager:
         self._cleanup_expired()
         
         # Check for pending requests
-        pending = self.get_pending_request()
+        pending = self.get_pending_request(session_id=session_id)
         if not pending:
             return False, None, None
         
@@ -338,11 +382,14 @@ class ConversationContextManager:
         elif pending.type == PendingType.CHOICE:
             # Try to match choice
             choices = pending.context.get("choices", [])
+            user_text = (user_input or "").strip().lower()
             for i, choice in enumerate(choices):
+                idx = i + 1
+                idx_pattern = rf"(?:^|\\D)#?{idx}(?:\\D|$)"
                 if (
-                    str(i + 1) in user_input
-                    or choice.lower() in user_input.lower()
-                    or user_input.lower() in choice.lower()
+                    re.search(idx_pattern, user_text) is not None
+                    or choice.lower() in user_text
+                    or user_text in choice.lower()
                 ):
                     pending.collected_data["choice"] = choice
                     pending.collected_data["choice_index"] = i
@@ -497,6 +544,40 @@ class ConversationContextManager:
         except Exception as exc:
             return f"Failed to close the window: {exc}"
 
+    def _news_detail_choice(self, request: PendingRequest) -> str:
+        """Summarize a selected news headline."""
+        items = request.context.get("items") or []
+        choice_index = request.collected_data.get("choice_index")
+        if choice_index is None or not isinstance(choice_index, int):
+            return "I couldn't match that choice to a headline."
+        if choice_index < 0 or choice_index >= len(items):
+            return "That headline choice was out of range."
+
+        item = items[choice_index] or {}
+        title = str(item.get("title") or "").strip() or "Headline"
+        url = str(item.get("url") or "").strip()
+        category = str(item.get("category") or "news").strip()
+
+        if not url:
+            return f"{title}\n\nI don't have a source link for that headline."
+
+        try:
+            from chintu_backend.automation.web.url_reader import get_url_reader
+        except Exception as exc:
+            return f"{title}\n\nI couldn't load the URL reader: {exc}"
+
+        try:
+            llm = self._get_news_llm()
+            reader = get_url_reader(llm_client=llm)
+            text, _meta = reader.fetch(url)
+            summary = self._summarize_news_text(text, llm=llm)
+        except Exception as exc:
+            return f"{title}\n\nI couldn't read that article: {exc}"
+
+        self._update_news_preferences(category)
+        summary = summary.strip() if summary else "I couldn't summarize that article yet."
+        return f"{title}\n\n{summary}"
+
     # =========================================================================
     # HELPER METHODS FOR COMMON SCENARIOS
     # =========================================================================
@@ -566,6 +647,7 @@ class ConversationContextManager:
         original_command: str,
         callback_name: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         """Create a choice request and return the prompt."""
         options = "\n".join(f"  {i+1}. {c}" for i, c in enumerate(choices))
@@ -577,8 +659,74 @@ class ConversationContextManager:
             original_command=original_command,
             context=context or {"choices": choices},
             callback_name=callback_name or "continue_task",
+            session_id=session_id,
         )
         return prompt
+
+    def _get_news_llm(self):
+        """Best-effort LLM client for news summarization."""
+        try:
+            from chintu_backend.brain.llm.adapter_client import get_adapter_client
+
+            adapter = get_adapter_client()
+            if adapter:
+                return adapter
+        except Exception:
+            pass
+
+        try:
+            from chintu_backend.core.config import get_config
+            from chintu_backend.brain.llm.ollama_client import OllamaClient
+
+            cfg = get_config()
+            return OllamaClient(
+                host=getattr(cfg, "ollama_host", "http://localhost:11434"),
+                model=getattr(cfg, "ollama_model", "llama3.1:8b"),
+                max_tokens=getattr(cfg, "llm_max_tokens", 1024),
+                temperature=getattr(cfg, "llm_temperature", 0.4),
+            )
+        except Exception:
+            return None
+
+    def _summarize_news_text(self, text: str, llm=None) -> str:
+        if not text:
+            return ""
+        cleaned = text.strip()
+        if llm:
+            prompt = (
+                "Summarize this news article in 4-6 bullet points. "
+                "End with a short 'Why it matters' sentence. "
+                "Keep the total under 900 characters.\n\n"
+                f"ARTICLE:\n{cleaned[:9000]}\n\nSUMMARY:"
+            )
+            try:
+                response = llm.generate(prompt) if hasattr(llm, "generate") else llm.chat(prompt)
+                return response.strip()
+            except Exception:
+                pass
+
+        # Fallback: first few sentences as bullets.
+        sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+        bullets = [s.strip() for s in sentences if s.strip()][:4]
+        if not bullets:
+            return cleaned[:600] + ("..." if len(cleaned) > 600 else "")
+        return "\n".join(f"- {b}" for b in bullets)
+
+    def _update_news_preferences(self, category: str) -> None:
+        """Nudge preference weights toward the selected news category."""
+        try:
+            from chintu_backend.brain.memory.preferences import get_preference_manager
+
+            pref_manager = get_preference_manager()
+            weights = dict(getattr(pref_manager.preferences, "news_category_weights", {}) or {})
+            if not weights:
+                weights = {"tech": 1.0, "finance": 1.0, "healthcare": 1.0}
+            if category not in weights:
+                weights[category] = 1.0
+            weights[category] = min(weights.get(category, 1.0) + 0.15, 2.5)
+            pref_manager.update(news_category_weights=weights)
+        except Exception:
+            return
 
     def cancel_all_pending(self) -> int:
         """Cancel all pending requests."""

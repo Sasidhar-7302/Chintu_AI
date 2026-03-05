@@ -25,7 +25,10 @@ def close_windows_by_title(title: str) -> tuple[bool, str]:
             except Exception as exc:
                 logger.error(f"Failed to close window '{w.title}': {exc}")
         if count > 0:
-            return True, f"Closed {count} window(s) named '{title}'."
+            import time
+            time.sleep(1.0)
+            summary = get_open_apps_summary()
+            return True, f"Closed {count} window(s) named '{title}'.\n\n{summary}"
         return False, f"Found '{title}' but couldn't close it."
     except ImportError:
         return False, "I need 'pygetwindow' to close apps."
@@ -36,63 +39,36 @@ def close_windows_by_title(title: str) -> tuple[bool, str]:
 logger = logging.getLogger(__name__)
 
 
-def handle_list_open_apps(text: str, context: Dict[str, Any]) -> ActionResult:
-    """List currently open applications and windows.
-    
-    Examples:
-    - "What apps are open?"
-    - "List open windows"
-    - "What is running?"
-    """
+def get_open_apps_summary() -> str:
+    """Get a summary of open applications."""
     try:
         import pygetwindow as gw
-        
-        # Get all window objects (better than titles for filtering)
         windows = gw.getAllWindows()
-        
-        # Filter for visible windows with titles
         active_windows = []
         for w in windows:
-            # Check for title and visibility
-            # Note: valid windows usually have a title and are visible (not minimized/hidden)
             if w.title and w.visible and w.title not in ["Program Manager", "Windows Input Experience"]:
                 active_windows.append(w.title)
         
-        # Deduplicate
         unique_windows = sorted(list(set(active_windows)))
-        
-        logger.info(f"Found {len(unique_windows)} visible windows: {unique_windows}")
-        
-        if not unique_windows:
-            return ActionResult.ok(
-                "I don't see any open application windows.",
-                {"count": 0, "windows": []},
-                "list_open_apps"
-            )
-        
         count = len(unique_windows)
         
-        # Format response
+        if not unique_windows:
+            return "I don't see any open application windows."
+            
         if count <= 5:
-            response = f"You have {count} apps open:\n" + "\n".join(f"• {w}" for w in unique_windows)
+            return f"You currently have {count} apps open: " + ", ".join(unique_windows)
         else:
             top_5 = unique_windows[:5]
-            response = f"You have {count} apps open, including:\n" + "\n".join(f"• {w}" for w in top_5) + f"\n...and {count-5} others."
-            
-        return ActionResult.ok(
-            response,
-            {"count": count, "windows": unique_windows},
-            "list_open_apps"
-        )
-        
-    except ImportError:
-        return ActionResult.fail(
-            "I need 'pygetwindow' to list apps. Please install it.",
-            "list_open_apps"
-        )
+            return f"You have {count} apps open, including: " + ", ".join(top_5) + f", and {count-5} others."
     except Exception as e:
-        logger.error(f"Error listing apps: {e}")
-        return ActionResult.fail(f"I couldn't list open apps: {e}", "list_open_apps")
+        logger.error(f"Error getting app summary: {e}")
+        return "I couldn't check what apps are open."
+
+
+def handle_list_open_apps(text: str, context: Dict[str, Any]) -> ActionResult:
+    """List currently open applications and windows."""
+    summary = get_open_apps_summary()
+    return ActionResult.ok(summary, {}, "list_open_apps")
 
 
 
@@ -111,8 +87,7 @@ def handle_close_app(text: str, context: Dict[str, Any]) -> ActionResult:
     if target in ["it", "that", "this"]:
         # Try to use last opened app from context/state
         last_app = get_state_manager().state.last_opened_app
-        opened_apps = get_state_manager().get_opened_apps()
-        if last_app and last_app in opened_apps:
+        if last_app:
             target = last_app
         else:
             return ActionResult.fail("I don't know what 'that' refers to. Which app?", "close_app")
@@ -121,7 +96,14 @@ def handle_close_app(text: str, context: Dict[str, Any]) -> ActionResult:
         import pygetwindow as gw
         state = get_state_manager()
         opened_apps = [a.lower() for a in state.get_opened_apps()]
-        windows = [w for w in gw.getAllWindows() if w.title and w.visible]
+        windows = []
+        if hasattr(gw, "getWindowsWithTitle"):
+            try:
+                windows = [w for w in gw.getWindowsWithTitle(target) if getattr(w, "title", None) and getattr(w, "visible", True)]
+            except Exception:
+                windows = []
+        if not windows and hasattr(gw, "getAllWindows"):
+            windows = [w for w in gw.getAllWindows() if w.title and w.visible]
 
         # Normalize target
         target_lower = target.lower()
@@ -182,7 +164,13 @@ def handle_close_app(text: str, context: Dict[str, Any]) -> ActionResult:
             # Update opened-by-Chintu list
             if opened_match:
                 state.clear_opened_app(target) if target in state.get_opened_apps() else None
-            return ActionResult.ok(f"Closed {count} window(s) matching '{target}'.", {"app": target, "count": count}, "close_app")
+            
+            # Brief delay to let OS update window list
+            import time
+            time.sleep(1.0)
+            summary = get_open_apps_summary()
+            
+            return ActionResult.ok(f"Closed {count} window(s) matching '{target}'.\n\n{summary}", {"app": target, "count": count}, "close_app")
         else:
             return ActionResult.fail(f"Found '{target}' but couldn't close it.", "close_app")
 
@@ -223,7 +211,7 @@ def register_app_listing_capabilities():
             "close app", "close window", "kill app", "close it", "close that", "exit app",
             "close notepad", "close chrome", "close firefox", "close edge", "close browser",
             "close word", "close excel", "close outlook", "close spotify", "close discord",
-            "close teams", "close slack", "close vscode", "close code",
+            "close teams", "close slack", "close vscode", "close code", "close calculator",
             "quit notepad", "quit chrome", "quit firefox", "quit app",
             "kill notepad", "kill chrome", "close the app", "close the window"
         ],

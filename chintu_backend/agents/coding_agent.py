@@ -163,6 +163,21 @@ Return ONLY the filenames (relative paths).
                 message = "Fix applied successfully" if success else "Failed to write file"
                 if success and test_result and run_tests:
                     message += f"\n\nSandbox tests passed: {test_command}"
+                if success:
+                    try:
+                        from .change_journal import record_change, maybe_git_commit
+                        from ..core.config import get_config
+                        config = get_config()
+                        record_change(request_id, file_path, issue, diff_text, applied=True)
+                        commit_msg = str(getattr(config, "coding_agent_commit_message", "chintu: {file} {issue}"))
+                        commit_msg = commit_msg.format(file=Path(file_path).name, issue=issue[:80] if issue else "")
+                        committed, info = maybe_git_commit(file_path, commit_msg)
+                        if committed:
+                            message += f"\n\nGit commit: {info}"
+                        else:
+                            message += f"\n\nChange recorded for review."
+                    except Exception:
+                        message += f"\n\nChange recorded for review."
                 return {"success": success, "message": message}
             else:
                 return {"success": False, "message": "User rejected the fix"}

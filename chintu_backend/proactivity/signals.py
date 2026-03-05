@@ -91,8 +91,8 @@ class SignalManager:
         # 3. Network Check
         try:
             import socket
-            socket.create_connection(("8.8.8.8", 53), timeout=1)
-            new_signals["is_online"] = True
+            with socket.create_connection(("8.8.8.8", 53), timeout=1):
+                new_signals["is_online"] = True
         except (socket.timeout, OSError):
             new_signals["is_online"] = False
         

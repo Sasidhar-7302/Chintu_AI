@@ -70,6 +70,8 @@ class VoiceClient:
             beam_size=self.config.stt_beam_size,
             best_of=self.config.stt_best_of,
             partial_beam_size=self.config.stt_partial_beam_size,
+            reject_low_confidence_noise=self.config.stt_reject_low_confidence_noise,
+            low_confidence_noise_word_limit=self.config.stt_low_confidence_noise_word_limit,
         )
 
         self._running = False
@@ -89,11 +91,23 @@ class VoiceClient:
             except Exception as exc:
                 logger.warning("Gateway send failed: %s", exc)
 
+        async def on_partial(text: str):
+            if not text:
+                return
+            try:
+                await self.gateway.handle_partial_text(text)
+            except Exception as exc:
+                logger.warning("Gateway partial send failed: %s", exc)
+
         def on_text(text: str):
             asyncio.run_coroutine_threadsafe(on_transcript(text), self._loop)
 
+        def on_partial_text(text: str):
+            asyncio.run_coroutine_threadsafe(on_partial(text), self._loop)
+
         self.wake_word.set_callback(on_wake)
         self.stt.set_callback(on_text)
+        self.stt.set_partial_callback(on_partial_text)
 
     async def start(self) -> None:
         logger.info("VoiceClient starting...")

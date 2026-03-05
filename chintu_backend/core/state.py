@@ -51,6 +51,7 @@ class SystemState:
         "voice_commands": FeatureStatus("Voice Commands"),
         "hand_gestures": FeatureStatus("Hand Gestures"),
         "app_control": FeatureStatus("App Control"),
+        "system_control": FeatureStatus("System Control"),
         "job_search": FeatureStatus("Job Search"),
         "llm_integration": FeatureStatus("LLM Integration"),
         "audio": FeatureStatus("Audio"),
@@ -65,10 +66,12 @@ class SystemState:
         "mcp": FeatureStatus("MCP Tools"),
         "watchdog": FeatureStatus("Project Watchdogs"),
         "orchestrator": FeatureStatus("Project Orchestrator"),
+        "reliability": FeatureStatus("Reliability Gates"),
         "thumbnail": FeatureStatus("Thumbnail Generator"),
         "email_reader": FeatureStatus("Email Reader"),
         "identity_vault": FeatureStatus("Identity Vault"),
         "a2ui": FeatureStatus("A2UI Interface"),
+        "canvas": FeatureStatus("Live Canvas"),
         "telegram": FeatureStatus("Telegram Gateway"),
     })
     
@@ -94,6 +97,12 @@ class SystemState:
     hud_active_tools: List[str] = field(default_factory=list)
     hud_memory_context: str = ""
     hud_pending: Dict[str, Any] = field(default_factory=dict)
+
+    # Live Canvas
+    canvas_state: Dict[str, Any] = field(default_factory=dict)
+    
+    # Job tracking (Phase 10)
+    last_job_url: Optional[str] = None
 
 
 class StateManager:
@@ -297,6 +306,11 @@ class StateManager:
             self._state.hud_pending = pending
         self._notify_listeners()
 
+    def set_canvas_state(self, canvas_state: Dict[str, Any]):
+        """Update live canvas snapshot for UI."""
+        self._state.canvas_state = canvas_state or {}
+        self._notify_listeners()
+
     def _notify_listeners(self):
         """Notify all listeners of state change."""
         for listener in self._listeners:
@@ -337,6 +351,7 @@ class StateManager:
                 "memory_context": self._state.hud_memory_context,
                 "pending": self._state.hud_pending,
             },
+            "canvas": self._state.canvas_state,
         }
 
 

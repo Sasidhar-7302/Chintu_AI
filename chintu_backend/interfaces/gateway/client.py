@@ -35,6 +35,17 @@ class GatewayClient:
                 return
             self._ws = await websockets.connect(self.url, ping_interval=None)
             self._reader_task = asyncio.create_task(self._reader())
+            try:
+                await self.send_request(
+                    "gateway.hello",
+                    {
+                        "client_version": "1.0.0",
+                        "client_id": "local-node",
+                        "role": "client",
+                    },
+                )
+            except Exception:
+                pass
 
     async def close(self) -> None:
         async with self._lock:
@@ -80,3 +91,17 @@ class GatewayClient:
     async def handle_text(self, text: str, source: str = "voice") -> str:
         result = await self.send_request("assistant.handle", {"text": text, "source": source})
         return result.get("response", "") if isinstance(result, dict) else str(result)
+
+    async def handle_partial_text(self, text: str) -> None:
+        """Send a partial (non-final) transcript to the UI."""
+        # This is a notification, we don't wait for a response
+        await self.connect()
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "ui.partial_transcript",
+            "params": {"text": text},
+        }
+        await self._ws.send(json.dumps(payload))
+
+    async def update_session(self, **kwargs: Any) -> Dict[str, Any]:
+        return await self.send_request("session.update", kwargs)

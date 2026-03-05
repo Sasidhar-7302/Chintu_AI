@@ -18,6 +18,7 @@ class CredentialType(Enum):
     TELEGRAM_BOT_TOKEN = "telegram_bot_token"
     GROQ_API_KEY = "groq_api_key"
     GEMINI_API_KEY = "gemini_api_key"
+    NVIDIA_API_KEY = "nvidia_api_key"
     OPENAI_API_KEY = "openai_api_key"
     GITHUB_TOKEN = "github_token"
     NOTION_TOKEN = "notion_token"
@@ -64,6 +65,13 @@ class CredentialDetector:
             "config_key": "gemini_api_key",
             "description": "Google/Gemini API key",
         },
+        # NVIDIA API keys: nvapi-xxxx
+        CredentialType.NVIDIA_API_KEY: {
+            "pattern": r'\b(nvapi-[A-Za-z0-9_-]{20,})\b',
+            "service": "NVIDIA",
+            "config_key": "nvidia_api_key",
+            "description": "NVIDIA API key (NIM)",
+        },
         # OpenAI API keys: sk-xxxxxx
         CredentialType.OPENAI_API_KEY: {
             "pattern": r'\b(sk-[A-Za-z0-9]{48,})\b',
@@ -88,6 +96,7 @@ class CredentialDetector:
         ],
         CredentialType.GROQ_API_KEY: ["groq", "llm", "api key"],
         CredentialType.GEMINI_API_KEY: ["gemini", "google", "bard", "api key"],
+        CredentialType.NVIDIA_API_KEY: ["nvidia", "nim", "api key", "nvapi"],
         CredentialType.OPENAI_API_KEY: ["openai", "chatgpt", "gpt", "api key"],
         CredentialType.GITHUB_TOKEN: ["github", "gh", "token", "api key"],
     }
@@ -100,6 +109,7 @@ class CredentialDetector:
         "HASS_TOKEN": (CredentialType.HASS_TOKEN, "Home Assistant", "hass_token", "Home Assistant token"),
         "GOOGLE_CLIENT_ID": (CredentialType.GOOGLE_CLIENT_ID, "Google", "google_client_id", "Google client ID"),
         "GOOGLE_CLIENT_SECRET": (CredentialType.GOOGLE_CLIENT_SECRET, "Google", "google_client_secret", "Google client secret"),
+        "NVIDIA_API_KEY": (CredentialType.NVIDIA_API_KEY, "NVIDIA", "nvidia_api_key", "NVIDIA API key"),
     }
     
     def detect(self, text: str) -> Optional[DetectedCredential]:
@@ -173,6 +183,7 @@ class ServiceIntent(Enum):
     TELEGRAM_SETUP = "telegram_setup"
     GROQ_SETUP = "groq_setup"
     GEMINI_SETUP = "gemini_setup"
+    NVIDIA_SETUP = "nvidia_setup"
     OPENAI_SETUP = "openai_setup"
     GITHUB_SETUP = "github_setup"
     NOTION_SETUP = "notion_setup"
@@ -227,6 +238,15 @@ class ServiceIntentDetector:
             "service_name": "Gemini",
             "required_credential": "API key from aistudio.google.com",
             "help_text": "Get your Gemini API key from aistudio.google.com and paste it here.",
+        },
+        ServiceIntent.NVIDIA_SETUP: {
+            "patterns": [
+                r"\b(connect|setup|configure|enable|use)\b.*\b(nvidia|nim)\b",
+                r"\b(nvidia|nim)\b.*\b(key|api|setup)\b",
+            ],
+            "service_name": "NVIDIA",
+            "required_credential": "API key from build.nvidia.com",
+            "help_text": "Get your NVIDIA API key from build.nvidia.com and paste it here.",
         },
         ServiceIntent.OPENAI_SETUP: {
             "patterns": [

@@ -7,6 +7,7 @@ import threading
 import time
 from dataclasses import asdict
 from datetime import datetime, timedelta
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..core.capabilities import Capability, ActionResult, get_registry
@@ -42,6 +43,26 @@ class OrchestratorManager:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._running = False
+        self._last_idle_block_log_ts = 0.0
+
+        # Optional learning + long-horizon memory integration.
+        self.learning_engine = None
+        try:
+            from chintu_backend.brain.learning import get_learning_engine
+
+            self.learning_engine = get_learning_engine()
+        except Exception:
+            self.learning_engine = None
+
+        self.gcc_controller = None
+        if getattr(self.config, "gcc_enabled", True):
+            try:
+                from chintu_backend.brain.learning.gcc_context_controller import get_gcc_controller
+
+                self.gcc_controller = get_gcc_controller()
+                self.gcc_controller.initialize(project_goal=getattr(self.config, "gcc_default_goal", ""))
+            except Exception:
+                self.gcc_controller = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -82,23 +103,49 @@ class OrchestratorManager:
     def create_project_from_request(self, request: str, auto_run: bool = False) -> Dict[str, Any]:
         defaults = self._defaults()
         spec = self.planner.plan(request, defaults)
+        return self.create_project_from_spec(spec, source_request=request, auto_run=auto_run)
+
+    def create_project_from_spec(
+        self,
+        spec: Dict[str, Any],
+        source_request: str = "",
+        auto_run: bool = False,
+    ) -> Dict[str, Any]:
         status_value = spec.get("status", ProjectStatus.ACTIVE.value)
         try:
             status = ProjectStatus(status_value)
         except Exception:  # noqa: BLE001
             status = ProjectStatus.ACTIVE
+        metadata = dict(spec.get("metadata") or {})
+        if source_request:
+            metadata.setdefault("source_request", source_request.strip()[:400])
         project = self.store.create_project(
             name=spec["name"],
             description=spec["description"],
             run_start_hour=spec["run_start_hour"],
             run_end_hour=spec["run_end_hour"],
             daily_budget_minutes=spec["daily_budget_minutes"],
-            metadata={"source_request": request.strip()[:400]},
+            metadata=metadata,
             status=status,
         )
+        project = self._ensure_gcc_project_branch(project) or project
         steps = self._materialize_steps(project, spec.get("steps") or [])
         missing_inputs = self.list_missing_inputs(project.id)
         approvals = self.store.list_pending_approvals(project.id)
+
+        try:
+            from chintu_backend.brain.orchestration.trace import log_event
+
+            log_event(
+                {
+                    "event": "orchestrator_project_created",
+                    "project_id": project.id,
+                    "name": project.name,
+                    "steps": [s.title for s in steps],
+                }
+            )
+        except Exception:
+            pass
 
         self._broadcast(
             {
@@ -120,6 +167,53 @@ class OrchestratorManager:
             "missing_inputs": missing_inputs,
             "pending_approvals": approvals,
         }
+
+    # ------------------------------------------------------------------
+    # GCC integration
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _slugify(value: str) -> str:
+        raw = (value or "").strip().lower()
+        raw = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+        raw = re.sub(r"-{2,}", "-", raw).strip("-")
+        return raw or "project"
+
+    def _get_gcc_branch(self, project: OrchestratorProject) -> str:
+        if not self.gcc_controller:
+            return ""
+        meta = project.metadata or {}
+        branch = str(meta.get("gcc_branch") or "").strip()
+        if branch:
+            return branch
+        updated = self._ensure_gcc_project_branch(project)
+        return str((updated.metadata or {}).get("gcc_branch") or "") if updated else ""
+
+    def _ensure_gcc_project_branch(self, project: OrchestratorProject) -> Optional[OrchestratorProject]:
+        if not self.gcc_controller or not getattr(self.config, "gcc_enabled", True):
+            return project
+
+        meta = dict(project.metadata or {})
+        if meta.get("gcc_branch"):
+            return project
+
+        slug = self._slugify(project.name)[:28]
+        branch = f"proj-{project.id[:8]}-{slug}"
+        purpose = f"Orchestrator project: {project.name}. {project.description}".strip()
+        try:
+            self.gcc_controller.create_branch(branch, purpose=purpose[:300], from_branch="main", switch=False)
+            self.gcc_controller.append_log(
+                observation=f"Created orchestrator project '{project.name}' ({project.id[:8]}).",
+                thought=f"Branch='{branch}'. Run window={project.run_start_hour:02d}:00-{project.run_end_hour:02d}:00.",
+                action="Initialized project memory branch.",
+                result=(meta.get("source_request") or "")[:400],
+                branch=branch,
+            )
+        except Exception:
+            pass
+
+        meta["gcc_branch"] = branch
+        updated = self.store.update_project(project.id, metadata_json=meta)
+        return updated or project
 
     def list_projects(self, statuses: Optional[Iterable[ProjectStatus]] = None) -> List[OrchestratorProject]:
         return self.store.list_projects(statuses=statuses)
@@ -159,6 +253,29 @@ class OrchestratorManager:
             "missing_inputs": self.list_missing_inputs(project_id),
             "pending_approvals": [asdict(a) for a in self.store.list_pending_approvals(project_id)],
             "recent_runs": [asdict(r) for r in self.store.list_runs(project_id, limit=10)],
+        }
+
+    def get_overview(self, limit: int = 20) -> Dict[str, Any]:
+        """Return a UI-friendly snapshot of orchestrator projects + approvals.
+
+        This is designed for dashboards (black-box view). Keep it JSON-safe.
+        """
+
+        projects = self.store.list_projects()[: max(1, int(limit))]
+        approvals = self.store.list_pending_approvals(project_id=None)
+
+        steps_by_project: Dict[str, List[Dict[str, Any]]] = {}
+        missing_inputs: Dict[str, List[str]] = {}
+        for proj in projects:
+            steps_by_project[proj.id] = [self._step_dict(s) for s in self.store.list_steps(proj.id)]
+            missing_inputs[proj.id] = self.list_missing_inputs(proj.id)
+
+        return {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "projects": [self._project_dict(p) for p in projects],
+            "steps_by_project": steps_by_project,
+            "missing_inputs": missing_inputs,
+            "pending_approvals": [self._approval_dict(a) for a in approvals],
         }
 
     # ------------------------------------------------------------------
@@ -267,6 +384,8 @@ class OrchestratorManager:
     def _find_next_step(self, project: OrchestratorProject, manual: bool) -> Optional[OrchestratorStep]:
         if not manual and not self._within_run_window(project):
             return None
+        if not manual and self._requires_idle(project) and not self._within_idle_policy(project):
+            return None
         if not manual and not self._within_daily_budget(project):
             return None
 
@@ -313,11 +432,12 @@ class OrchestratorManager:
             self.store.update_step(step.id, status=StepStatus.FAILED.value, last_error="No matching capability")
             return False, f"No capability for step: {step.title}"
 
-        # Step-level approval based on risk.
-        if self._needs_step_approval(step) and not self._is_approved(step):
+        # Step-level approval based on project + risk.
+        if self._needs_step_approval(step, project) and not self._is_approved(step):
             self._request_approval(project, step, f"Step risk is {step.risk_level}")
             return False, ""
 
+        agent_context, runtime = self._build_agent_context(project, step)
         context = {
             "_policy_checked": True,
             "_confirmed": True,
@@ -329,10 +449,114 @@ class OrchestratorManager:
                 for k in step.required_inputs
             },
         }
+        if agent_context:
+            context = {**agent_context, **context}
+
+        # Run lifecycle (unifies Orchestrator work with the Runs dashboard).
+        run_mgr = None
+        run_id = ""
+        run_step_id = ""
+        try:
+            from chintu_backend.core.run_manager import EvidenceRef, get_run_manager
+
+            run_mgr = get_run_manager()
+            record = run_mgr.create_run(
+                session_id="orchestrator",
+                source="orchestrator",
+                user_text=f"[{project.name}] {step.title}".strip()[:2000],
+                meta={
+                    "project_id": project.id,
+                    "project_name": project.name,
+                    "step_id": step.id,
+                    "step_title": step.title,
+                    "capability": capability.name,
+                },
+            )
+            run_id = record.id
+            context["_run_id"] = run_id
+            run_mgr.acquire_run_turn(run_id)
+            run_step_id = run_mgr.start_step(
+                run_id,
+                title=step.title or step.command,
+                capability=capability.name,
+                meta={"kind": "orchestrator_step", "project_id": project.id, "step_id": step.id},
+            )
+
+            def _evidence_from_result_data(data: Any) -> list[EvidenceRef]:
+                if not isinstance(data, dict):
+                    return []
+                evidence: list[EvidenceRef] = []
+                seen: set[str] = set()
+                for key in (
+                    "path",
+                    "artifact_path",
+                    "file_path",
+                    "report_path",
+                    "screenshot",
+                    "filepath",
+                ):
+                    val = data.get(key)
+                    if not val:
+                        continue
+                    sval = str(val)
+                    if sval and sval not in seen:
+                        seen.add(sval)
+                        evidence.append(EvidenceRef(kind="path", value=sval, summary="artifact"))
+                url = data.get("url")
+                if url:
+                    evidence.append(EvidenceRef(kind="url", value=str(url), summary="url"))
+                app = data.get("app")
+                if app:
+                    evidence.append(EvidenceRef(kind="app", value=str(app), summary="app"))
+                return evidence
+
+        except Exception:
+            run_mgr = None
+            run_id = ""
+            run_step_id = ""
 
         started_at = datetime.now()
         attempts = int(step.attempts) + 1
         self.store.update_step(step.id, status=StepStatus.RUNNING.value, attempts=attempts, last_error="")
+        self._notify_step(project, step, status="starting")
+
+        gcc_branch = self._get_gcc_branch(project)
+        if gcc_branch:
+            try:
+                self.gcc_controller.append_log(
+                    observation=f"Orchestrator step starting: {step.title}",
+                    thought=f"project={project.name}; capability={capability.name}; attempts={attempts}",
+                    action=step.command,
+                    result="",
+                    branch=gcc_branch,
+                )
+            except Exception:
+                pass
+        if runtime and getattr(runtime, "session_store", None):
+            runtime.session_store.append_event(
+                {
+                    "event": "orchestrator_step_start",
+                    "project_id": project.id,
+                    "step_id": step.id,
+                    "step_title": step.title,
+                    "capability": capability.name,
+                }
+            )
+
+        try:
+            from chintu_backend.brain.orchestration.trace import log_event
+
+            log_event(
+                {
+                    "event": "orchestrator_step_start",
+                    "project_id": project.id,
+                    "step_id": step.id,
+                    "capability": capability.name,
+                    "command": step.command,
+                }
+            )
+        except Exception:
+            pass
 
         try:
             result = self.registry.execute(capability, step.command, context)
@@ -341,6 +565,48 @@ class OrchestratorManager:
 
         finished_at = datetime.now()
         duration_seconds = max(0.0, (finished_at - started_at).total_seconds())
+
+        # Run lifecycle: close out the run step + run status (never block orchestrator on this).
+        try:
+            if run_mgr and run_id and run_step_id:
+                verification = {}
+                try:
+                    from chintu_backend.core.verification import verify_action_result
+
+                    verification = verify_action_result(result)
+                except Exception:
+                    verification = {}
+
+                evidence = []
+                try:
+                    evidence = _evidence_from_result_data(getattr(result, "data", None))
+                except Exception:
+                    evidence = []
+
+                status = "completed" if bool(getattr(result, "success", False)) else "failed"
+                run_mgr.end_step(
+                    run_id,
+                    run_step_id,
+                    status=status,
+                    message=getattr(result, "message", "") or "",
+                    capability=capability.name,
+                    evidence=evidence,
+                    meta={"verification": verification} if verification else None,
+                )
+
+                # If the user cancelled via UI (run cancel), treat as cancelled.
+                if run_mgr.is_cancel_requested(run_id):
+                    run_mgr.mark_cancelled(run_id, reason="cancelled by user")
+                elif bool(getattr(result, "requires_confirmation", False)):
+                    # Orchestrator approvals are handled separately; don't block the Runs dashboard.
+                    run_mgr.mark_completed(run_id, message="Approval requested (see Approvals).")
+                elif bool(getattr(result, "success", False)):
+                    run_mgr.mark_completed(run_id, message=getattr(result, "message", "") or "")
+                else:
+                    run_mgr.mark_failed(run_id, error=getattr(result, "message", "") or "failed")
+                run_mgr.release_run_turn(run_id)
+        except Exception:
+            pass
 
         if result.requires_confirmation:
             # Avoid leaving a dangling global pending confirmation.
@@ -357,6 +623,26 @@ class OrchestratorManager:
                 duration_seconds=duration_seconds,
             )
             return False, ""
+
+        # If a cancellation was requested mid-execution, reflect that in orchestrator state too.
+        try:
+            if run_mgr and run_id and run_mgr.is_cancel_requested(run_id):
+                self.store.update_step(step.id, status=StepStatus.SKIPPED.value, last_error="Cancelled by user")
+                self.store.record_run(
+                    project.id,
+                    step.id,
+                    started_at,
+                    finished_at,
+                    success=False,
+                    result="",
+                    error="Cancelled by user",
+                    duration_seconds=duration_seconds,
+                )
+                self._broadcast_step_update(project.id, step.id, "failed")
+                self._notify_step(project, step, status="failed", detail="Cancelled by user")
+                return False, "Cancelled by user"
+        except Exception:
+            pass
 
         if result.success:
             self.store.update_step(
@@ -376,7 +662,67 @@ class OrchestratorManager:
                 duration_seconds=duration_seconds,
             )
             self._broadcast_step_update(project.id, step.id, "completed")
+            self._notify_step(project, step, status="completed", detail=result.message)
+            if runtime and getattr(runtime, "session_store", None):
+                runtime.session_store.append_event(
+                    {
+                        "event": "orchestrator_step_complete",
+                        "project_id": project.id,
+                        "step_id": step.id,
+                        "step_title": step.title,
+                        "success": True,
+                        "duration_seconds": duration_seconds,
+                    }
+                )
             self._maybe_complete_project(project.id)
+
+            # Record learning + GCC milestone (orchestrator bypasses CommandHandler).
+            try:
+                if self.learning_engine:
+                    self.learning_engine.observe_interaction(
+                        user_text=step.command,
+                        assistant_text=result.message or "",
+                        result=result,
+                        meta={"model_source": "orchestrator"},
+                        source="orchestrator",
+                        sensitive=False,
+                    )
+            except Exception:
+                pass
+            if gcc_branch:
+                try:
+                    update_main = str(step.risk_level).lower() in {"high", "critical"}
+                    safe_msg = (result.message or "").strip()
+                    summary = f"[orchestrator] {capability.name}: {step.title}".strip()[:200]
+                    contribution = (
+                        f"Project: {project.name} ({project.id[:8]})\n"
+                        f"Step: {step.order_index}. {step.title}\n"
+                        f"Command: {step.command}\n"
+                        f"Result: {safe_msg[:1200]}"
+                    )
+                    self.gcc_controller.commit(
+                        summary=summary,
+                        contribution=contribution,
+                        update_main=update_main,
+                        roadmap_note=f"[{project.name}] {step.title}: {safe_msg[:160]}",
+                        branch=gcc_branch,
+                    )
+                except Exception:
+                    pass
+            try:
+                from chintu_backend.brain.orchestration.trace import log_event
+
+                log_event(
+                    {
+                        "event": "orchestrator_step_complete",
+                        "project_id": project.id,
+                        "step_id": step.id,
+                        "success": True,
+                        "duration_seconds": duration_seconds,
+                    }
+                )
+            except Exception:
+                pass
             return True, ""
 
         # Failure path with optional retry backoff.
@@ -401,6 +747,57 @@ class OrchestratorManager:
             duration_seconds=duration_seconds,
         )
         self._broadcast_step_update(project.id, step.id, "failed")
+        self._notify_step(project, step, status="failed", detail=last_error)
+        try:
+            if self.learning_engine:
+                self.learning_engine.observe_interaction(
+                    user_text=step.command,
+                    assistant_text=last_error,
+                    result=result,
+                    meta={"model_source": "orchestrator"},
+                    source="orchestrator",
+                    sensitive=False,
+                )
+        except Exception:
+            pass
+        if gcc_branch:
+            try:
+                self.gcc_controller.append_log(
+                    observation=f"Orchestrator step failed: {step.title}",
+                    thought=f"project={project.name}; capability={capability.name}; attempts={attempts}",
+                    action=step.command,
+                    result=last_error,
+                    branch=gcc_branch,
+                )
+            except Exception:
+                pass
+        if runtime and getattr(runtime, "session_store", None):
+            runtime.session_store.append_event(
+                {
+                    "event": "orchestrator_step_complete",
+                    "project_id": project.id,
+                    "step_id": step.id,
+                    "step_title": step.title,
+                    "success": False,
+                    "error": last_error,
+                    "duration_seconds": duration_seconds,
+                }
+            )
+        try:
+            from chintu_backend.brain.orchestration.trace import log_event
+
+            log_event(
+                {
+                    "event": "orchestrator_step_complete",
+                    "project_id": project.id,
+                    "step_id": step.id,
+                    "success": False,
+                    "error": last_error,
+                    "duration_seconds": duration_seconds,
+                }
+            )
+        except Exception:
+            pass
         return False, last_error
 
     # ------------------------------------------------------------------
@@ -409,6 +806,8 @@ class OrchestratorManager:
     def _materialize_steps(self, project: OrchestratorProject, steps: List[Dict[str, Any]]) -> List[OrchestratorStep]:
         if not steps:
             return []
+        approval_mode = str((project.metadata or {}).get("approval_mode") or "").lower()
+        force_approval = approval_mode in {"all_steps", "every_step", "always"}
         # First insert without dependencies, then resolve numeric dependencies to ids.
         blank_deps = [{**s, "depends_on": []} for s in steps]
         inserted = self.store.add_steps(project.id, blank_deps)
@@ -417,15 +816,19 @@ class OrchestratorManager:
             step_id = index_to_id.get(i)
             if not step_id:
                 continue
-            dep_nums = spec.get("depends_on_numbers") or []
+            raw_deps = spec.get("depends_on_numbers") or spec.get("depends_on") or []
+            dep_nums = [int(x) for x in raw_deps if str(x).isdigit()]
             dep_ids = [index_to_id[n] for n in dep_nums if n in index_to_id]
+            assigned_agent = spec.get("assigned_agent") or spec.get("agent_role")
+            approval_required = bool(spec.get("approval_required", False)) or force_approval
             self.store.update_step(
                 step_id,
                 depends_on_json=dep_ids,
                 required_inputs_json=spec.get("required_inputs") or [],
                 risk_level=spec.get("risk_level") or "low",
                 estimated_minutes=int(spec.get("estimated_minutes") or 10),
-                approval_required=bool(spec.get("approval_required", False)),
+                approval_required=approval_required,
+                assigned_agent=assigned_agent,
             )
         return self.store.list_steps(project.id)
 
@@ -456,12 +859,48 @@ class OrchestratorManager:
         missing: List[str] = []
         for key in step.required_inputs:
             info = self.store.get_input(key, project_id=project_id)
-            if not info or not info.get("value"):
-                missing.append(key)
+            if info and info.get("value"):
+                continue
+            if self._input_available_elsewhere(key):
+                continue
+            missing.append(key)
         return missing
 
-    def _needs_step_approval(self, step: OrchestratorStep) -> bool:
-        return bool(step.approval_required) or str(step.risk_level).lower() in {"high", "critical"}
+    @staticmethod
+    def _input_available_elsewhere(key: str) -> bool:
+        """Best-effort check for inputs that are already configured outside OrchestratorStore.
+
+        This avoids repeatedly asking for secrets that already exist in env vars / Identity Vault.
+        """
+
+        import os
+
+        if not key:
+            return False
+        normalized = str(key).strip().upper().replace("-", "_")
+
+        aliases = {
+            # Common provider keys (Config loads these from Identity Vault into env on startup).
+            "GROQ_API_KEY": "GROQ_API_KEY",
+            "GEMINI_API_KEY": "GOOGLE_AI_KEY",
+            "GOOGLE_AI_KEY": "GOOGLE_AI_KEY",
+            "DEEPSEEK_API_KEY": "DEEPSEEK_API_KEY",
+            "NVIDIA_API_KEY": "NVIDIA_API_KEY",
+            # OAuth client creds (optional future YouTube upload step).
+            "GOOGLE_CLIENT_ID": "GOOGLE_CLIENT_ID",
+            "GOOGLE_CLIENT_SECRET": "GOOGLE_CLIENT_SECRET",
+        }
+        env_key = aliases.get(normalized) or aliases.get(normalized.replace("CHINTU_", "")) or normalized
+        return bool(os.environ.get(env_key))
+
+    def _needs_step_approval(self, step: OrchestratorStep, project: Optional[OrchestratorProject] = None) -> bool:
+        if bool(step.approval_required):
+            return True
+        if project:
+            mode = str((project.metadata or {}).get("approval_mode") or "").lower()
+            if mode in {"all_steps", "every_step", "always"}:
+                return True
+        return str(step.risk_level).lower() in {"high", "critical"}
 
     def _is_approved(self, step: OrchestratorStep) -> bool:
         latest = self.store.get_latest_approval(step.id)
@@ -486,13 +925,68 @@ class OrchestratorManager:
         return ""
 
     def _within_run_window(self, project: OrchestratorProject) -> bool:
+        from ..core.time_window import is_hour_in_window
+
         now = datetime.now()
-        hour = now.hour
+        hour = int(now.hour)
         start = int(project.run_start_hour)
         end = int(project.run_end_hour)
-        if end <= start:
-            end = min(24, start + 1)
-        return start <= hour < end
+        return bool(is_hour_in_window(hour, start, end))
+
+    def _requires_idle(self, project: OrchestratorProject) -> bool:
+        if project and isinstance(project.metadata, dict):
+            if str(project.metadata.get("require_idle", "")).lower() in {"1", "true", "yes", "on"}:
+                return True
+        return bool(getattr(self.config, "orchestrator_require_idle", False))
+
+    def _within_idle_policy(self, project: OrchestratorProject) -> bool:
+        """Return True if the PC appears idle enough to run background work."""
+
+        from ..core.system_idle import is_idle
+
+        min_idle_seconds = float(getattr(self.config, "orchestrator_idle_min_seconds", 10 * 60))
+        max_cpu = float(getattr(self.config, "orchestrator_idle_max_cpu_percent", 30.0))
+        max_gpu = float(getattr(self.config, "orchestrator_idle_max_gpu_util_percent", 25.0))
+
+        if project and isinstance(project.metadata, dict):
+            try:
+                if project.metadata.get("idle_min_seconds") is not None:
+                    min_idle_seconds = float(project.metadata["idle_min_seconds"])
+            except Exception:
+                pass
+            try:
+                if project.metadata.get("idle_max_cpu_percent") is not None:
+                    max_cpu = float(project.metadata["idle_max_cpu_percent"])
+            except Exception:
+                pass
+            try:
+                if project.metadata.get("idle_max_gpu_util_percent") is not None:
+                    max_gpu = float(project.metadata["idle_max_gpu_util_percent"])
+            except Exception:
+                pass
+
+        ok, reason, snap = is_idle(
+            min_idle_seconds=min_idle_seconds,
+            max_cpu_percent=max_cpu,
+            max_gpu_util_percent=max_gpu,
+        )
+        if ok:
+            return True
+
+        # Throttle log spam to ~1 message per 10 minutes.
+        now_ts = time.time()
+        if now_ts - self._last_idle_block_log_ts > 600:
+            self._last_idle_block_log_ts = now_ts
+            try:
+                details = (
+                    f"idle={snap.idle_seconds if snap.idle_seconds is not None else 'n/a'}s "
+                    f"cpu={snap.cpu_percent if snap.cpu_percent is not None else 'n/a'}% "
+                    f"gpu={snap.gpu_util_percent if snap.gpu_util_percent is not None else 'n/a'}%"
+                )
+                self.state_manager.log_activity(f"Orchestrator paused (waiting for idle): {reason} ({details})")
+            except Exception:
+                pass
+        return False
 
     def _within_daily_budget(self, project: OrchestratorProject) -> bool:
         used = self.store.minutes_used_today(project.id)
@@ -654,7 +1148,46 @@ class OrchestratorManager:
             data["next_eligible_at"] = step.next_eligible_at.isoformat(timespec="seconds")
         return data
 
+    @staticmethod
+    def _approval_dict(approval) -> Dict[str, Any]:
+        data = asdict(approval)
+        try:
+            created = getattr(approval, "created_at", None)
+            decided = getattr(approval, "decided_at", None)
+            if created:
+                data["created_at"] = created.isoformat(timespec="seconds")
+            if decided:
+                data["decided_at"] = decided.isoformat(timespec="seconds")
+        except Exception:
+            pass
+        return data
+
     def _broadcast(self, payload: Dict[str, Any]) -> None:
+        # 1) Gateway path: publish structured events onto the EventBus so the Gateway bridge
+        # can forward them to UI clients connected to the Node gateway.
+        try:
+            msg_type = str(payload.get("type") or "").strip()
+            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+            if msg_type == "orchestrator_update":
+                self.event_bus.publish_sync(
+                    Event(
+                        type=EventType.ORCHESTRATOR_UPDATE,
+                        source="orchestrator",
+                        data=data,
+                    )
+                )
+            elif msg_type == "orchestrator_request":
+                self.event_bus.publish_sync(
+                    Event(
+                        type=EventType.ORCHESTRATOR_REQUEST,
+                        source="orchestrator",
+                        data=data,
+                    )
+                )
+        except Exception:
+            pass
+
+        # 2) Legacy path: broadcast via the internal Python WebSocket server (older UIs).
         server = get_ws_server()
         if not server:
             return
@@ -665,6 +1198,62 @@ class OrchestratorManager:
             import asyncio
 
             asyncio.run_coroutine_threadsafe(server.broadcast_message(payload), loop)
+        except Exception:
+            return
+
+    def _build_agent_context(
+        self,
+        project: OrchestratorProject,
+        step: OrchestratorStep,
+    ) -> Tuple[Dict[str, Any], Optional[object]]:
+        agent_key = (step.assigned_agent or "").strip()
+        if not agent_key:
+            return {}, None
+        try:
+            from ..agents.agent_directory import get_agent_directory
+
+            directory = get_agent_directory()
+            runtime = directory.get_or_create(agent_key, role=agent_key)
+            context = directory.build_context(runtime, agent_key)
+            return context, runtime
+        except Exception:
+            return {}, None
+
+    def _notify_step(
+        self,
+        project: OrchestratorProject,
+        step: OrchestratorStep,
+        *,
+        status: str,
+        detail: str = "",
+    ) -> None:
+        try:
+            agent = step.assigned_agent or "primary"
+            title = f"{project.name}: {step.title}"
+            status_label = status.replace("_", " ").title()
+            message = f"{status_label} (agent: {agent})."
+            if detail:
+                message = f"{message} {detail[:200]}"
+            self.event_bus.publish_sync(
+                Event(
+                    type=EventType.NOTIFICATION,
+                    source="orchestrator",
+                    data={
+                        "category": "orchestrator_step",
+                        "severity": "low" if status == "completed" else "medium",
+                        "title": title,
+                        "message": message,
+                        "metadata": {
+                            "project_id": project.id,
+                            "project_name": project.name,
+                            "step_id": step.id,
+                            "step_title": step.title,
+                            "status": status,
+                            "agent": agent,
+                        },
+                    },
+                )
+            )
         except Exception:
             return
 

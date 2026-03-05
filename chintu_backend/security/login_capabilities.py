@@ -7,6 +7,7 @@ Provides voice commands for:
 """
 
 import logging
+from urllib.parse import urlparse
 from typing import Dict, Any, Optional
 
 from ..core.capabilities import (
@@ -18,6 +19,59 @@ from ..core.capabilities import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_SITE_ALIASES = {
+    "yt": "youtube",
+    "googlemail": "gmail",
+    "mail": "gmail",
+}
+
+
+def _normalize_site(site: str) -> str:
+    raw = str(site or "").strip().lower()
+    return _SITE_ALIASES.get(raw, raw)
+
+
+def _infer_site_from_active_browser() -> str:
+    try:
+        from ..automation.browser.browser_controller import get_browser_controller
+
+        controller = get_browser_controller(headless=False, profile_name=None)
+        if not controller or not getattr(controller, "is_open", False):
+            return ""
+        info = controller.get_page_info()
+        url = str(getattr(info, "url", "") or "").strip()
+        if not url:
+            return ""
+        host = str(urlparse(url).hostname or "").lower()
+        if host.endswith("youtube.com") or host.endswith("youtu.be"):
+            return "youtube"
+        if host.endswith("accounts.google.com") or host.endswith("google.com"):
+            return "google"
+        if host.endswith("mail.google.com") or host.endswith("gmail.com"):
+            return "gmail"
+        return ""
+    except Exception:
+        return ""
+
+
+def _open_login_page(site: str) -> Optional[str]:
+    try:
+        from .auto_login import get_auto_login
+        from ..automation.browser.browser_controller import get_browser_controller
+        from ..core.config import get_config
+
+        auto_login = get_auto_login()
+        login_url = auto_login.get_login_url(site)
+        if not login_url:
+            return None
+        profile_name = str(getattr(get_config(), "research_browser_loggedin_profile", "") or "").strip() or "assistant_accounts"
+        controller = get_browser_controller(headless=False, profile_name=profile_name)
+        page = controller.open_url(login_url)
+        return str(getattr(page, "url", "") or login_url)
+    except Exception:
+        return None
 
 
 def handle_save_login(text: str, context: Dict[str, Any]) -> ActionResult:
@@ -74,7 +128,24 @@ def handle_login_to(text: str, context: Dict[str, Any]) -> ActionResult:
             "Auto-login requires Playwright. Run: pip install playwright && playwright install chromium",
             "login_to"
         )
-    
+    text_lower = text.lower()
+    waiting_meta = context.get("_waiting_input_meta") if isinstance(context.get("_waiting_input_meta"), dict) else {}
+    resume_waiting_input = bool(context.get("_resume_waiting_input"))
+
+    if resume_waiting_input and any(
+        marker in text_lower
+        for marker in ("done", "finished", "completed", "logged in", "signed in", "continue", "resume")
+    ):
+        site_hint = _normalize_site(str(waiting_meta.get("site") or "").strip())
+        if not site_hint:
+            site_hint = _infer_site_from_active_browser()
+        site_label = site_hint or "the site"
+        return ActionResult.ok(
+            f"Great. I marked the manual login step complete for {site_label}. I'm ready for the next action.",
+            {"site": site_hint, "awaiting_user_action": False, "manual_login_required": False},
+            "login_to",
+        )
+
     vault = get_credential_vault()
     auto_login = get_auto_login()
     
@@ -95,7 +166,6 @@ def handle_login_to(text: str, context: Dict[str, Any]) -> ActionResult:
         )
     
     # Extract site name
-    text_lower = text.lower()
     site = None
     
     # Try to find site name in command
@@ -110,20 +180,62 @@ def handle_login_to(text: str, context: Dict[str, Any]) -> ActionResult:
         if match:
             site = match.group(1)
             break
-    
+
+    ambiguous_site_tokens = {"here", "there", "this", "that", "now", "it"}
+    if site and str(site).strip().lower() in ambiguous_site_tokens:
+        site = None
+
+    if not site:
+        hinted_site = _normalize_site(str(waiting_meta.get("site") or "").strip())
+        if hinted_site:
+            site = hinted_site
+    if not site:
+        site = _infer_site_from_active_browser()
+
     if not site:
         supported = ", ".join(auto_login.get_supported_sites())
         return ActionResult.fail(
             f"Please specify which site to log into. Supported: {supported}",
             "login_to"
         )
-    
-    # Get stored credentials
-    cred = vault.get_credential(site)
-    
+
+    site = _normalize_site(site)
+    lookup_order = [site]
+    if site == "youtube":
+        lookup_order.extend(["google", "gmail"])
+    elif site == "google":
+        lookup_order.append("gmail")
+    elif site == "gmail":
+        lookup_order.append("google")
+
+    # Get stored credentials (alias-aware)
+    cred = None
+    cred_site = ""
+    for candidate in lookup_order:
+        cred = vault.get_credential(candidate)
+        if cred:
+            cred_site = candidate
+            break
+
     if not cred:
+        opened = _open_login_page(site)
+        if opened:
+            return ActionResult.ok(
+                f"I opened the sign-in page for {site} ({opened}). "
+                "Please complete login manually in that browser window. I will wait for your next instruction. "
+                "If you want auto-login next time, save credentials in the vault first.",
+                {
+                    "site": site,
+                    "url": opened,
+                    "manual_login_required": True,
+                    "awaiting_user_action": True,
+                    "awaiting_user_action_type": "manual_login",
+                },
+                "login_to",
+            )
         return ActionResult.fail(
-            f"I don't have stored credentials for '{site}'. Say 'Save my {site} login' first.",
+            f"I don't have stored credentials for '{site}'. "
+            f"Say 'Save my {site} login' first. For security, I only use vault credentials, not chat history.",
             "login_to"
         )
     
@@ -131,9 +243,17 @@ def handle_login_to(text: str, context: Dict[str, Any]) -> ActionResult:
     result = auto_login.login(site, cred.username, cred.password, headless=False)
     
     if result.success:
+        used = cred_site or site
+        waiting_user = bool(getattr(result, "requires_user_action", False))
         return ActionResult.ok(
-            f"Successfully logged into {site.title()}!",
-            {"site": site, "url": result.url},
+            str(result.message or f"Successfully logged into {site.title()} using stored credentials for {used}."),
+            {
+                "site": site,
+                "credential_site": used,
+                "url": result.url,
+                "awaiting_user_action": waiting_user,
+                "awaiting_user_action_type": str(getattr(result, "user_action", "") or "").strip(),
+            },
             "login_to"
         )
     else:
@@ -256,7 +376,12 @@ def register_login_capabilities(registry: Optional[CapabilityRegistry] = None) -
                 "log me into",
                 "log into",
                 "login to",
+                "log in to",
                 "sign in to",
+                "sign me in to",
+                "login here",
+                "sign in here",
+                "continue login",
                 "authenticate to",
             ],
             handler=handle_login_to,

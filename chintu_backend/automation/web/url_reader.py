@@ -220,7 +220,14 @@ CONTENT:
 SUMMARY:"""
 
         try:
-            return self.llm.generate(prompt).strip()
+            if hasattr(self.llm, "generate"):
+                return str(self.llm.generate(prompt) or "").strip()
+            if hasattr(self.llm, "answer_question"):
+                return str(self.llm.answer_question(prompt) or "").strip()
+            if hasattr(self.llm, "route_and_execute"):
+                response, _source = self.llm.route_and_execute(prompt, memory_context="", behavior_context="")
+                return str(response or "").strip()
+            raise AttributeError("LLM client does not expose generate/answer_question/route_and_execute")
         except Exception as e:
             logger.warning(f"LLM summarization failed: {e}")
             return text[:max_length] + "..." if len(text) > max_length else text

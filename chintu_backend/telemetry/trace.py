@@ -12,6 +12,8 @@ import logging
 import json
 import uuid
 import time
+import os
+import re
 from datetime import datetime, timezone
 from typing import Optional
 from contextvars import ContextVar
@@ -19,6 +21,43 @@ from functools import wraps
 
 trace_id: ContextVar[str] = ContextVar("trace_id", default="")
 request_start: ContextVar[float] = ContextVar("request_start", default=0.0)
+
+
+class SecretRedactionFilter(logging.Filter):
+    """Redact known secret formats from log output."""
+
+    _GENERIC_TELEGRAM_TOKEN = re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{30,80}\b")
+    _BOT_URL_TOKEN = re.compile(r"bot(\d{8,12}:[A-Za-z0-9_-]{30,80})")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._literal_secrets = []
+        for key in ("TELEGRAM_BOT_TOKEN", "GROQ_API_KEY", "GOOGLE_AI_KEY", "DEEPSEEK_API_KEY", "NVIDIA_API_KEY"):
+            value = str(os.environ.get(key, "") or "").strip()
+            if value:
+                self._literal_secrets.append(value)
+
+    def _redact(self, value: str) -> str:
+        if not value:
+            return value
+
+        redacted = value
+        for secret in self._literal_secrets:
+            redacted = redacted.replace(secret, "[REDACTED_SECRET]")
+        redacted = self._GENERIC_TELEGRAM_TOKEN.sub("[REDACTED_TELEGRAM_TOKEN]", redacted)
+        redacted = self._BOT_URL_TOKEN.sub("bot[REDACTED_TELEGRAM_TOKEN]", redacted)
+        return redacted
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+            cleaned = self._redact(message)
+            if cleaned != message:
+                record.msg = cleaned
+                record.args = ()
+        except Exception:
+            pass
+        return True
 
 
 class StructuredJsonFormatter(logging.Formatter):
@@ -205,6 +244,7 @@ def setup_json_logging(level: int = logging.INFO, log_file: Optional[str] = None
     root = logging.getLogger()
     root.setLevel(level)
     root.handlers.clear()
+    secret_filter = SecretRedactionFilter()
 
     try:
         import sys
@@ -220,6 +260,7 @@ def setup_json_logging(level: int = logging.INFO, log_file: Optional[str] = None
     console.setFormatter(logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     ))
+    console.addFilter(secret_filter)
     root.addHandler(console)
 
     if log_file:
@@ -227,12 +268,19 @@ def setup_json_logging(level: int = logging.INFO, log_file: Optional[str] = None
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(StructuredJsonFormatter())
+        file_handler.addFilter(secret_filter)
         root.addHandler(file_handler)
 
     # Add WebSocket handler for UI log streaming
     ws_handler = WebSocketLogHandler()
     ws_handler.setLevel(level)
+    ws_handler.addFilter(secret_filter)
     root.addHandler(ws_handler)
+
+    # Quiet noisy transport logs that can leak full request URLs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
 
     logging.getLogger("chintu").info("Structured JSON logging configured (with WebSocket streaming)")
 

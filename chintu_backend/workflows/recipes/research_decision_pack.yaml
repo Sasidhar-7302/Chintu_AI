@@ -1,0 +1,8 @@
+name: research-decision-pack
+description: "Cofounder workflow pack: research synthesis, recommendation, and follow-up plan."
+args:
+  topic:
+    default: "local-first autonomous cofounder strategy"
+steps:
+  - id: execute
+    command: "shell:python scripts/workflow_packs/research_decision_pack.py --topic \"${topic}\""

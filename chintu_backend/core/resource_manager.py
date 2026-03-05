@@ -25,7 +25,7 @@ class SystemStatus:
     cpu_percent: float
     ram_percent: float
     ram_available_mb: int
-    is_gaming: bool  # Heuristic: High GPU usage but Chintu is idle?
+    gpu_pressure: bool  # Heuristic: High GPU usage from external processes
     recommendation: str
 
 class ResourceManager:
@@ -61,18 +61,18 @@ class ResourceManager:
             except Exception as e:
                 logger.warning(f"psutil check failed: {e}")
         
-        # 3. Detect "Gaming Mode" / High Load
+        # 3. Detect "High GPU Load"
         # If VRAM pressure is High/Critical and we (Chintu) aren't running a heavy model yet,
-        # it's likely an external app (Game, Video Render).
+        # it's likely an external app (Video Render, 3D app, or Game).
         # Improving this heuristic requires knowing OWN process GPU usage vs TOTAL.
         # For now, we trust VRAM pressure.
         
-        is_gaming = vram.pressure in (VRAMPressure.HIGH, VRAMPressure.CRITICAL)
+        gpu_pressure = vram.pressure in (VRAMPressure.HIGH, VRAMPressure.CRITICAL)
         
         # 4. Formulate Recommendation
         rec = "Standard"
-        if is_gaming:
-            rec = "Use Cloud or CPU (Gaming Mode)"
+        if gpu_pressure:
+            rec = "High GPU Load detected. Preferring Cloud/CPU."
         elif ram_free < 4096 and vram.free_mb < 2000:
             rec = "System constrained. Use Small Models."
         elif vram.free_mb > 8000:
@@ -83,7 +83,7 @@ class ResourceManager:
             cpu_percent=cpu_p,
             ram_percent=ram_p,
             ram_available_mb=ram_free,
-            is_gaming=is_gaming,
+            gpu_pressure=gpu_pressure,
             recommendation=rec
         )
         

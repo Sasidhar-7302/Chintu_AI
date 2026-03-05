@@ -58,18 +58,27 @@ class VRAMMonitor:
         self.vram_limit_mb = vram_limit_mb
         self.safety_margin_mb = safety_margin_mb
         self._nvidia_smi_available = self._check_nvidia_smi()
+        if self._nvidia_smi_available:
+            detected = self._get_total_vram()
+            if detected:
+                self.vram_limit_mb = detected
         
         # Model size estimates (Q4_K_M quantization)
         self.model_sizes = {
             "qwen2.5:1.5b": 1200,      # ~1.2GB
             "qwen2.5:3b": 2400,        # ~2.4GB
+            "qwen2.5:7b": 4200,        # ~4.2GB
             "qwen2.5-coder:7b": 4500,  # ~4.5GB
             "llama3.1:8b": 4800,       # ~4.8GB
             "phi3.5:mini": 2400,       # ~2.4GB
             "gemma2:2b": 1600,         # ~1.6GB
         }
         
-        logger.info(f"VRAMMonitor initialized: {vram_limit_mb}MB limit, nvidia-smi={'yes' if self._nvidia_smi_available else 'no'}")
+        logger.info(
+            "VRAMMonitor initialized: %sMB limit, nvidia-smi=%s",
+            self.vram_limit_mb,
+            "yes" if self._nvidia_smi_available else "no",
+        )
     
     def _check_nvidia_smi(self) -> bool:
         """Check if nvidia-smi is available."""
@@ -81,6 +90,25 @@ class VRAMMonitor:
             return result.returncode == 0
         except Exception:
             return False
+
+    def _get_total_vram(self) -> int:
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                values = []
+                for ln in result.stdout.splitlines():
+                    num = self._parse_nvidia_int(ln)
+                    if num is not None and num > 0:
+                        values.append(num)
+                if values:
+                    # Multi-GPU safe: choose the largest VRAM device (usually main brain GPU).
+                    return max(values)
+        except Exception:
+            return 0
+        return 0
     
     def get_status(self) -> VRAMStatus:
         """Get current VRAM status."""
@@ -98,16 +126,52 @@ class VRAMMonitor:
             )
             
             if result.returncode == 0:
-                parts = result.stdout.strip().split(",")
-                total = int(parts[0].strip())
-                used = int(parts[1].strip())
-                free = int(parts[2].strip())
-                
-                return self._build_status(total, used, free)
+                rows: List[Tuple[int, int, int]] = []
+                for line in (result.stdout or "").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) < 3:
+                        continue
+                    total = self._parse_nvidia_int(parts[0])
+                    used = self._parse_nvidia_int(parts[1])
+                    free = self._parse_nvidia_int(parts[2])
+                    if total is None:
+                        continue
+                    if used is None and free is None:
+                        continue
+                    if used is None and free is not None:
+                        used = max(0, total - free)
+                    if free is None and used is not None:
+                        free = max(0, total - used)
+                    if used is None or free is None:
+                        continue
+                    rows.append((total, used, free))
+
+                if rows:
+                    # Pick the highest VRAM GPU to avoid dual-GPU parsing ambiguity.
+                    total, used, free = max(rows, key=lambda row: row[0])
+                    return self._build_status(total, used, free)
         except Exception as e:
             logger.warning(f"nvidia-smi query failed: {e}")
         
         return self._get_estimated_status()
+
+    def _parse_nvidia_int(self, value: str) -> Optional[int]:
+        """Parse an integer from nvidia-smi CSV values robustly."""
+        if value is None:
+            return None
+        try:
+            return int(str(value).strip())
+        except Exception:
+            match = re.search(r"(\d+)", str(value))
+            if not match:
+                return None
+            try:
+                return int(match.group(1))
+            except Exception:
+                return None
     
     def _get_estimated_status(self) -> VRAMStatus:
         """Estimate VRAM status when nvidia-smi unavailable."""

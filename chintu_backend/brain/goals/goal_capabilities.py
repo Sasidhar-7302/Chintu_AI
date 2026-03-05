@@ -31,9 +31,9 @@ def register_goal_capabilities():
     registry.register(Capability(
         name="create_goal",
         triggers=[
-            r"(?:remind me to|remind|set goal|schedule).+(?:every|daily|weekly|hourly|at \d)",
+            r"(?:remind me to|remind|set goal|schedule).+(?:every|daily|weekly|hourly)",
             r"(?:read|tell|send|check|monitor|track).+(?:every morning|every day|every hour|every week|every month|daily|weekly)",
-            r"(?:every morning|every day|every hour|at \d+\s*(?:am|pm)).+(?:read|tell|send|check|remind)",
+            r"(?:every morning|every day|every hour).+(?:read|tell|send|check|remind)",
         ],
         handler=_handle_create_goal,
         description="Create a recurring or scheduled goal",

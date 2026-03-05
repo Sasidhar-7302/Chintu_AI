@@ -130,6 +130,28 @@ class AudioCapture:
         """Set callback for audio level updates (for waveform)."""
         self._level_callback = callback
     
+    def check_hardware_available(self) -> bool:
+        """Check if any microphone hardware is actually available."""
+        if not self._backend:
+            return False
+        
+        try:
+            if self._backend == "sounddevice":
+                devices = sd.query_devices()
+                has_input = any(d.get("max_input_channels", 0) > 0 for d in devices)
+                return has_input
+            elif self._backend == "pyaudio" and hasattr(self, "_pa"):
+                count = self._pa.get_device_count()
+                for i in range(count):
+                    info = self._pa.get_device_info_by_index(i)
+                    if info.get("maxInputChannels", 0) > 0:
+                        return True
+                return False
+        except Exception as e:
+            logger.debug(f"Audio hardware check failed: {e}")
+            return False
+        return False
+
     def start(self):
         """Start capturing audio."""
         if self._running:
@@ -138,6 +160,17 @@ class AudioCapture:
         if self._backend is None:
             # No audio backend – keep running without microphone, but do not start capture thread.
             logger.info("AudioCapture.start() called with no available backend; skipping microphone capture.")
+            return
+        
+        # Verify hardware before starting
+        if not self.check_hardware_available():
+            logger.info("No microphone detected. Audio capture will not start.")
+            try:
+                from chintu_backend.core.state import get_state_manager
+                sm = get_state_manager()
+                sm.update_feature("microphone", enabled=False, status="inactive", error="No microphone detected")
+            except Exception:
+                pass
             return
         
         self._running = True
@@ -189,7 +222,8 @@ class AudioCapture:
             devices = sd.query_devices()
             has_input = any(d.get("max_input_channels", 0) > 0 for d in devices)
             if not has_input:
-                logger.info("No microphone detected; audio capture disabled")
+                device_list_str = "\n".join([f"{i}: {d['name']} (In: {d.get('max_input_channels', 0)})" for i, d in enumerate(devices)])
+                logger.info(f"No microphone detected. Found devices:\n{device_list_str}")
                 self._running = False
                 try:
                     from chintu_backend.core.state import get_state_manager
@@ -204,7 +238,7 @@ class AudioCapture:
                         Exception("No microphone detected"),
                         severity=ErrorSeverity.WARNING,
                         component="microphone",
-                        user_message="Microphone not detected. Voice input is disabled.",
+                        user_message="Microphone not detected. Checked all devices but none reported input channels.",
                     )
                 except Exception:
                     pass
@@ -283,6 +317,13 @@ class AudioCapture:
                 "blocksize": 4096, # Increased from default
                 "latency": "high"  # Relaxed latency constraints
             }
+            
+            # --- Windows Intelligence: Fallback Sample Rates ---
+            # If 16000 fails (common on some Windows drivers/exclusive modes), try standard rates.
+            fallback_rates = [16000, 44100, 48000, 22050]
+            if self.sample_rate not in fallback_rates:
+                fallback_rates.insert(0, self.sample_rate)
+            
             input_device_indices = []
             for idx, d in enumerate(devices):
                 if d.get("max_input_channels", 0) > 0:
@@ -318,16 +359,22 @@ class AudioCapture:
 
             last_error = None
             for candidate in valid_candidates:
-                try:
-                    params["device"] = candidate
-                    try_open(params)
-                    return
-                except Exception as e:
-                    last_error = e
-                    if "Invalid device" in str(e) or "-9996" in str(e):
-                        logger.warning(f"Sounddevice device error: {e}; trying next input device")
-                    else:
-                        logger.warning(f"Sounddevice device error: {e}")
+                for rate in fallback_rates:
+                    try:
+                        params["device"] = candidate
+                        params["samplerate"] = rate
+                        try_open(params)
+                        # If successful, update internal state
+                        self.sample_rate = rate
+                        return
+                    except Exception as e:
+                        last_error = e
+                        if "Invalid device" in str(e) or "-9996" in str(e) or "Invalid sample rate" in str(e):
+                            logger.debug(f"Sounddevice try failed (dev={candidate}, rate={rate}): {e}")
+                            continue
+                        else:
+                            logger.warning(f"Sounddevice unexpected error: {e}")
+                            break
 
             if not valid_candidates:
                 logger.info("No compatible microphone device found; audio capture disabled")

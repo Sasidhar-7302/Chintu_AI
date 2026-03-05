@@ -137,12 +137,14 @@ class InterruptHandler:
             
         text_lower = text.lower().strip()
         
-        # Direct match
+        # Direct match (exact word or with punctuation)
         if text_lower in self.STOP_PHRASES:
             return True
             
-        # Starts with stop phrase
-        for phrase in self.STOP_PHRASES:
+        # Prefixes - Only match if it's a "Shut up" style phrase or explicitly addressed to Chintu
+        # We avoid generic prefixes like "cancel " to allow "cancel task X" to reach the LLM.
+        hard_stop_prefixes = {"chintu stop", "stop talking", "shut up", "okay stop", "that's enough"}
+        for phrase in hard_stop_prefixes:
             if text_lower.startswith(phrase + " ") or text_lower.startswith(phrase + ","):
                 return True
                 

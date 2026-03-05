@@ -23,7 +23,12 @@ class UserPreferences:
     response_style: str = "balanced"  # "concise", "balanced", "detailed"
     response_language: str = "english"
     use_humor: bool = True
-    
+    tone_style: str = "warm"  # warm | neutral | formal | direct
+    empathy_level: str = "medium"  # low | medium | high
+    directness: str = "high"  # low | medium | high
+    busy_mode: bool = False  # Prefer brief responses when busy
+    entrepreneurial_mode: bool = True  # Bias toward product/entrepreneur framing
+
     # App preferences
     default_browser: str = "chrome"
     default_editor: str = "vscode"
@@ -33,6 +38,9 @@ class UserPreferences:
     confirmation_required: bool = False  # Ask before destructive actions
     auto_listen_after_response: bool = True  # Conversation mode
     wake_word_enabled: bool = True
+    behavior_role: str = "cofounder"  # cofounder | manager | assistant | buddy | advisor
+    persistence: str = "high"  # low | medium | high
+    risk_posture: str = "balanced"  # cautious | balanced | bold
     
     # Voice preferences
     tts_voice: str = "en-US-AriaNeural"
@@ -41,6 +49,14 @@ class UserPreferences:
     # Memory preferences
     save_conversations: bool = True
     conversation_memory_days: int = 30  # How long to keep conversation history
+
+    # News preferences
+    news_headlines_daily: int = 20
+    news_categories: List[str] = field(default_factory=lambda: ["tech", "finance", "healthcare"])
+    news_category_weights: Dict[str, float] = field(
+        default_factory=lambda: {"tech": 1.0, "finance": 1.0, "healthcare": 1.0}
+    )
+    news_hide_urls: bool = True
     
     # User info (explicitly set by user)
     user_name: Optional[str] = None
@@ -88,6 +104,8 @@ class UserPreferences:
             parts.append(f"User is located in {self.location}.")
         
         parts.append(f"Response style preference: {self.response_style}.")
+        parts.append(f"Tone: {self.tone_style}. Empathy: {self.empathy_level}. Directness: {self.directness}.")
+        parts.append(f"Role preference: {self.behavior_role}.")
         
         if self.frequently_used_apps:
             apps = ", ".join(self.frequently_used_apps[:5])

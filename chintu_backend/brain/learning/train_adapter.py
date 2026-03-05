@@ -22,7 +22,7 @@ class TrainingOutcome:
     missing_deps: Optional[List[str]] = None
 
 
-def train_adapter(dataset_path: Path, output_dir: Path) -> TrainingOutcome:
+def train_adapter(dataset_path: Path, output_dir: Path, activate: bool = True) -> TrainingOutcome:
     config = get_config()
     base_model = getattr(config, "learning_base_model_id", "Qwen/Qwen2.5-1.5B-Instruct")
     max_steps = int(getattr(config, "learning_train_max_steps", 80))
@@ -114,7 +114,8 @@ def train_adapter(dataset_path: Path, output_dir: Path) -> TrainingOutcome:
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     adapter_path = output_dir / f"adapter_{stamp}"
     model.save_pretrained(adapter_path)
-    _write_active_adapter(adapter_path, base_model, output_dir)
+    if activate:
+        set_active_adapter(adapter_path, base_model, output_dir)
     return TrainingOutcome(ok=True, message="LoRA adapter trained.", adapter_path=str(adapter_path))
 
 
@@ -204,7 +205,7 @@ def _select_lora_modules(model) -> List[str]:
     return sorted(found) or preferred
 
 
-def _write_active_adapter(adapter_path: Path, base_model: str, output_dir: Path) -> None:
+def set_active_adapter(adapter_path: Path, base_model: str, output_dir: Path) -> None:
     info = {"base_model": base_model, "adapter_path": str(adapter_path)}
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "active_adapter.json").write_text(json.dumps(info, indent=2), encoding="utf-8")

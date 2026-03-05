@@ -151,6 +151,15 @@ class LearningEngine:
         self.journal = LearningJournal(self.config.memory_markdown_dir)
         self.credential_detector = get_credential_detector()
         self.state_manager = get_state_manager()
+        self.gcc_controller = None
+        if getattr(self.config, "gcc_enabled", True):
+            try:
+                from chintu_backend.brain.learning.gcc_context_controller import get_gcc_controller
+
+                self.gcc_controller = get_gcc_controller()
+                self.gcc_controller.initialize(project_goal=getattr(self.config, "gcc_default_goal", ""))
+            except Exception:
+                self.gcc_controller = None
 
     def observe_interaction(
         self,
@@ -188,7 +197,13 @@ class LearningEngine:
             capability=capability,
             model=str(meta.get("model_source", "")) if meta else "",
             confidence=0.7 if getattr(result, "success", True) else 0.4,
-            trainable=self._is_trainable(result, category),
+            trainable=self._is_trainable(
+                result,
+                category,
+                meta=meta,
+                user_text=clean_user,
+                assistant_text=clean_assistant,
+            ),
             metadata=metadata,
         )
 
@@ -269,12 +284,81 @@ class LearningEngine:
                     }
                 handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
                 count += 1
+        
+        # Export Knowledge Base "Books"
+        count += self._export_knowledge_base(output_path, format)
+        return count
+
+    def _export_knowledge_base(self, output_path: Path, format: str) -> int:
+        """Export structured knowledge as training data."""
+        knowledge_dir = self.config.data_dir / "knowledge"
+        if not knowledge_dir.exists():
+            return 0
+            
+        count = 0
+        with output_path.open("a", encoding="utf-8") as handle:
+            # Walk directory
+            for category_dir in knowledge_dir.iterdir():
+                if not category_dir.is_dir(): continue
+                
+                for topic_dir in category_dir.iterdir():
+                    if not topic_dir.is_dir(): continue
+                    
+                    topic = topic_dir.name.replace("_", " ")
+                    for file in topic_dir.glob("*.md"):
+                        if file.name == "index.md": continue
+                        
+                        try:
+                            content = file.read_text(encoding="utf-8")
+                            # Extract Frontmatter? Assuming raw markdown for now.
+                            # Ideally we parse topic/chapter from filename or content
+                            
+                            chapter_title = file.stem.replace("chapter_", "").replace("_", " ").title()
+                            
+                            prompt = f"Explain {chapter_title} regarding {topic}."
+                            
+                            if format == "instruction":
+                                payload = {
+                                    "instruction": prompt,
+                                    "output": content,
+                                    "metadata": {"source": "knowledge_base", "topic": topic}
+                                }
+                            else:
+                                payload = {
+                                    "messages": [
+                                        {"role": "user", "content": prompt},
+                                        {"role": "assistant", "content": content}
+                                    ]
+                                }
+                            handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+                            count += 1
+                        except Exception:
+                            pass
         return count
 
     def _record_event(self, event: LearningEvent) -> None:
         self.store.log_event(event)
         self._save_to_memory(event)
         self._append_journal(event)
+        if self.gcc_controller:
+            try:
+                self.gcc_controller.record_event(event)
+            except Exception:
+                pass
+
+    def record_gap(self, gap: str, context: Optional[Dict[str, Any]] = None) -> None:
+        if not getattr(self.config, "learning_enabled", True):
+            return
+        event = LearningEvent(
+            id=str(uuid.uuid4()),
+            timestamp=_utc_now(),
+            category="gap",
+            content=gap,
+            source="system",
+            metadata=context or {},
+            trainable=False,
+        )
+        self._record_event(event)
         try:
             self.state_manager.update_feature("memory", enabled=True, status="active")
         except Exception:
@@ -388,14 +472,31 @@ class LearningEngine:
             pass
         return masked
 
-    def _is_trainable(self, result: Any, category: str) -> bool:
+    def _is_trainable(
+        self,
+        result: Any,
+        category: str,
+        meta: Optional[Dict[str, Any]] = None,
+        user_text: str = "",
+        assistant_text: str = "",
+    ) -> bool:
         if not getattr(self.config, "learning_train_enabled", True):
             return False
-        if result is None:
+        if category in {"mistake"}:
             return False
+        if result is None:
+            # Conversation and web learning can still be trainable if model output is substantive.
+            model_source = str((meta or {}).get("model_source", "")).strip().lower()
+            if model_source in {"", "rule", "error", "none"}:
+                return False
+            if len((user_text or "").strip().split()) < 2:
+                return False
+            if len((assistant_text or "").strip().split()) < 5:
+                return False
+            return category in {"general", "research", "developer", "workflow"}
         if not getattr(result, "success", True):
             return False
-        if category in {"mistake"}:
+        if getattr(result, "requires_confirmation", False):
             return False
         return True
 

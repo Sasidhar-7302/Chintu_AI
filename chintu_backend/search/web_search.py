@@ -6,7 +6,8 @@ Provides web search functionality using DuckDuckGo (free, no API key needed).
 import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-from datetime import datetime
+
+from .news_quality import extract_domain, parse_published_at, reliability_score
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,9 @@ class SearchResult:
     snippet: str
     url: str
     source: str = "web"
+    published_at: str = ""
+    domain: str = ""
+    reliability_score: float = 0.0
 
 
 class WebSearchEngine:
@@ -80,11 +84,13 @@ class WebSearchEngine:
             
             search_results = []
             for r in results:
+                url = r.get("href", "")
                 search_results.append(SearchResult(
                     title=r.get("title", "No title"),
                     snippet=r.get("body", "")[:300],
-                    url=r.get("href", ""),
-                    source="duckduckgo"
+                    url=url,
+                    source="duckduckgo",
+                    domain=extract_domain(url, "duckduckgo"),
                 ))
             
             logger.info(f"Search for '{query}' returned {len(search_results)} results")
@@ -94,13 +100,21 @@ class WebSearchEngine:
             logger.error(f"Search failed: {e}")
             return []
     
-    def search_news(self, query: str, max_results: int = 5) -> List[SearchResult]:
+    def search_news(
+        self,
+        query: str,
+        max_results: int = 5,
+        timelimit: Optional[str] = None,
+        region: str = "us-en",
+    ) -> List[SearchResult]:
         """
         Search for news articles.
         
         Args:
             query: Search query
             max_results: Maximum number of results
+            timelimit: DuckDuckGo timelimit filter (d/w/m/y)
+            region: Region code for localized results
             
         Returns:
             List of SearchResult objects
@@ -112,16 +126,30 @@ class WebSearchEngine:
             with self._ddgs_class() as ddgs:
                 results = list(ddgs.news(
                     query,
-                    max_results=min(max_results, 10)
+                    max_results=min(max_results, 10),
+                    timelimit=timelimit,
+                    region=region,
                 ))
             
             search_results = []
             for r in results:
+                title = r.get("title", "No title")
+                snippet = (r.get("body", "") or "")[:300]
+                url = r.get("url", "")
+                source = r.get("source", "news")
+                published_raw = str(r.get("date", "") or "").strip()
+                published_dt = parse_published_at(published_raw)
+                published_at = published_dt.isoformat().replace("+00:00", "Z") if published_dt else ""
+                domain = extract_domain(url, source)
+                rel = reliability_score(domain=domain, source=source, category="general")
                 search_results.append(SearchResult(
-                    title=r.get("title", "No title"),
-                    snippet=r.get("body", "")[:300],
-                    url=r.get("url", ""),
-                    source="news"
+                    title=title,
+                    snippet=snippet,
+                    url=url,
+                    source=source or domain or "news",
+                    published_at=published_at,
+                    domain=domain,
+                    reliability_score=rel,
                 ))
             
             logger.info(f"News search for '{query}' returned {len(search_results)} results")
@@ -165,7 +193,7 @@ class WebSearchEngine:
             logger.error(f"Image search failed: {e}")
             return []
     
-    def format_results(self, results: List[SearchResult], query: str) -> str:
+    def format_results(self, results: List[SearchResult], query: str, include_urls: bool = True) -> str:
         """
         Format search results as readable text.
         
@@ -184,7 +212,7 @@ class WebSearchEngine:
         for i, r in enumerate(results, 1):
             lines.append(f"**{i}. {r.title}**")
             lines.append(f"   {r.snippet}")
-            if r.url:
+            if include_urls and r.url:
                 lines.append(f"   [Source]({r.url})")
             lines.append("")
         
@@ -219,7 +247,7 @@ def search_web(query: str, max_results: int = 5) -> str:
     return engine.format_results(results, query)
 
 
-def search_news(query: str, max_results: int = 5) -> str:
+def search_news(query: str, max_results: int = 5, timelimit: Optional[str] = None, include_urls: bool = True) -> str:
     """
     Convenience function to search news.
     
@@ -231,5 +259,5 @@ def search_news(query: str, max_results: int = 5) -> str:
         Formatted news results string
     """
     engine = get_search_engine()
-    results = engine.search_news(query, max_results=max_results)
-    return engine.format_results(results, query)
+    results = engine.search_news(query, max_results=max_results, timelimit=timelimit)
+    return engine.format_results(results, query, include_urls=include_urls)

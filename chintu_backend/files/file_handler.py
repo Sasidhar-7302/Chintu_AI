@@ -297,15 +297,15 @@ class FileHandler:
             items = list(p.iterdir())
             items.sort(key=lambda x: (not x.is_dir(), x.name.lower()))
             
-            lines = [f"**Contents of {p.name}/** ({len(items)} items)\n"]
+            lines = [f"Contents of {p.name}/ ({len(items)} items)\n"]
             
             for item in items[:max_items]:
                 info = self.get_file_info(str(item))
                 if info:
                     if info.is_dir:
-                        lines.append(f"📁 {info.name}/")
+                        lines.append(f"[DIR] {info.name}/")
                     else:
-                        lines.append(f"📄 {info.name} ({info.size_human})")
+                        lines.append(f"[FILE] {info.name} ({info.size_human})")
             
             if len(items) > max_items:
                 lines.append(f"\n... and {len(items) - max_items} more items")

@@ -2,5 +2,6 @@
 
 from .server import GatewayServer
 from .client import GatewayClient
+from .node_agent import GatewayNodeAgent
 
-__all__ = ["GatewayServer", "GatewayClient"]
+__all__ = ["GatewayServer", "GatewayClient", "GatewayNodeAgent"]

@@ -24,7 +24,7 @@ try:
     CRYPTO_AVAILABLE = True
 except ImportError:
     CRYPTO_AVAILABLE = False
-    logger.warning("cryptography package not installed. Using basic encryption.")
+    # No fallback - we will fail securely if methods are called
 
 
 @dataclass
@@ -259,34 +259,24 @@ class CredentialVault:
             )
             self._key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
             self._fernet = Fernet(self._key)
+            self._key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+            self._fernet = Fernet(self._key)
         else:
-            # Basic fallback - less secure
-            self._key = hashlib.pbkdf2_hmac(
-                'sha256',
-                password.encode(),
-                salt,
-                100000
-            )
+             raise ImportError("Strict Security Enforcement: 'cryptography' library is missing. Cannot derive secure keys.")
     
     def _encrypt(self, data: str) -> str:
         """Encrypt data."""
         if CRYPTO_AVAILABLE and self._fernet:
             return self._fernet.encrypt(data.encode()).decode()
         else:
-            # Basic XOR encryption (fallback - less secure)
-            key = self._key[:len(data.encode())] if self._key else b''
-            encrypted = bytes(a ^ b for a, b in zip(data.encode(), key * (len(data.encode()) // len(key) + 1)))
-            return base64.b64encode(encrypted).decode()
+             raise ImportError("Strict Security Enforcement: 'cryptography' library matching. Cannot encrypt.")
     
     def _decrypt(self, data: str) -> str:
         """Decrypt data."""
         if CRYPTO_AVAILABLE and self._fernet:
             return self._fernet.decrypt(data.encode()).decode()
         else:
-            # Basic XOR decryption (fallback)
-            key = self._key[:len(base64.b64decode(data))] if self._key else b''
-            decrypted = bytes(a ^ b for a, b in zip(base64.b64decode(data), key * (len(base64.b64decode(data)) // len(key) + 1)))
-            return decrypted.decode()
+             raise ImportError("Strict Security Enforcement: 'cryptography' library matching. Cannot decrypt.")
     
     def _save_credentials(self):
         """Save credentials to encrypted file."""

@@ -11,6 +11,7 @@ This is what makes Chintu feel "intelligent" and trustworthy.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Optional, List, Callable, Dict, Any
 from enum import Enum
@@ -93,22 +94,31 @@ class ExecutiveBrain:
     It ensures multi-step tasks are planned, confirmed, and verified.
     """
     
-    def __init__(self, policy_engine=None, workflow_engine=None):
+    def __init__(self, policy_engine=None, workflow_engine=None, llm_client=None):
         """
         Initialize the executive brain.
         
         Args:
             policy_engine: ActionPolicyEngine for safety checks
             workflow_engine: WorkflowEngine for step execution
+            llm_client: OllamaClient for reasoning/verification
         """
         self._policy = policy_engine
         self._workflow_engine = workflow_engine
+        self.llm = llm_client
+        if not self.llm:
+            try:
+                from ..brain.llm.ollama_client import OllamaClient
+                self.llm = OllamaClient()
+            except Exception:
+                self.llm = None
+
         self._current_phase = ExecutionPhase.IDLE
         self._pending_plan: Optional[ExecutionPlan] = None
         self._progress_callback: Optional[Callable[[str], None]] = None
         
-        logger.info("ExecutiveBrain initialized")
-    
+        logger.info("ExecutiveBrain initialized with Recursive Reasoning")
+
     def set_progress_callback(self, callback: Callable[[str], None]):
         """Set callback for progress updates."""
         self._progress_callback = callback
@@ -136,14 +146,7 @@ class ExecutiveBrain:
     def analyze_task(self, goal: str) -> Dict[str, Any]:
         """
         Analyze a task to determine if it needs planning.
-        
-        Args:
-            goal: The user's goal/request
-            
-        Returns:
-            Analysis result with recommendation
         """
-        # Keywords that suggest multi-step tasks
         multi_step_keywords = [
             "and then", "after that", "first", "then",
             "research", "investigate", "compare",
@@ -154,7 +157,6 @@ class ExecutiveBrain:
         goal_lower = goal.lower()
         needs_plan = any(kw in goal_lower for kw in multi_step_keywords)
         
-        # Check for workflow triggers
         workflow_triggers = ["execute:", "do this:", "workflow:"]
         is_workflow = any(goal_lower.startswith(t) for t in workflow_triggers)
         
@@ -166,21 +168,11 @@ class ExecutiveBrain:
         }
     
     def create_plan(self, goal: str, steps: List[Dict] = None) -> ExecutionPlan:
-        """
-        Create an execution plan for a goal.
-        
-        Args:
-            goal: The user's goal
-            steps: Optional pre-defined steps (from workflow or LLM)
-            
-        Returns:
-            ExecutionPlan ready for confirmation
-        """
+        """Create an execution plan for a goal."""
         self._current_phase = ExecutionPhase.PLANNING
         self._report_progress("Creating execution plan...")
         
         if steps:
-            # Use provided steps
             exec_steps = [
                 ExecutionStep(
                     order=i + 1,
@@ -193,15 +185,18 @@ class ExecutiveBrain:
                 for i, s in enumerate(steps)
             ]
         else:
-            # Simple default plan for now
-            exec_steps = [
-                ExecutionStep(
-                    order=1,
-                    description=f"Execute: {goal}",
-                    capability="execute_workflow",
-                    estimated_seconds=5.0
-                )
-            ]
+            # God Mode: Use LLM to create a plan if available
+            if self.llm and self.llm.is_available:
+                exec_steps = self._llm_create_plan(goal)
+            else:
+                exec_steps = [
+                    ExecutionStep(
+                        order=1,
+                        description=f"Execute: {goal}",
+                        capability="execute_workflow",
+                        estimated_seconds=5.0
+                    )
+                ]
         
         # Assess overall risk
         risk_levels = {"low": 0, "medium": 1, "high": 2}
@@ -226,14 +221,44 @@ class ExecutiveBrain:
         
         self._report_progress("Plan created, awaiting confirmation")
         return plan
+
+    def _llm_create_plan(self, goal: str) -> List[ExecutionStep]:
+        """Use LLM to brainstorm a plan."""
+        prompt = f"""
+        User Goal: {goal}
+        
+        Decompose this goal into a sequence of concrete steps.
+        Each step must use one of the available capabilities.
+        Common capabilities: web_search, open_url, read_file, write_file, shell_command, code_interpreter.
+        
+        Return JSON list:
+        [
+            {{"description": "Brief step description", "capability": "name", "parameters": {{}}, "estimated_seconds": 2}}
+        ]
+        """
+        try:
+            response = self.llm.generate(prompt, system_prompt="You are Chintu's Strategic Planner.")
+            import json
+            match = re.search(r"\[.*\]", response, re.DOTALL)
+            if match:
+                steps_data = json.loads(match.group())
+                return [
+                    ExecutionStep(
+                        order=i + 1,
+                        description=s.get("description", f"Step {i+1}"),
+                        capability=s.get("capability", "unknown"),
+                        parameters=s.get("parameters", {}),
+                        estimated_seconds=float(s.get("estimated_seconds", 2.0))
+                    )
+                    for i, s in enumerate(steps_data)
+                ]
+        except Exception as e:
+            logger.error(f"LLM planning failed: {e}")
+        
+        return [ExecutionStep(order=1, description=f"Execute: {goal}", capability="execute_workflow")]
     
     def confirm_plan(self) -> bool:
-        """
-        User confirms the pending plan.
-        
-        Returns:
-            True if plan was confirmed and ready to execute
-        """
+        """User confirms the pending plan."""
         if not self._pending_plan:
             logger.warning("No pending plan to confirm")
             return False
@@ -248,21 +273,9 @@ class ExecutiveBrain:
         self._report_progress("Plan cancelled")
     
     def execute_plan(self, cap_registry=None) -> ExecutionResult:
-        """
-        Execute the confirmed plan.
-        
-        Args:
-            cap_registry: CapabilityRegistry for executing capabilities
-            
-        Returns:
-            ExecutionResult with details
-        """
+        """Execute the confirmed plan with recursive reasoning."""
         if not self._pending_plan:
-            return ExecutionResult(
-                success=False,
-                phase_reached=ExecutionPhase.FAILED,
-                message="No plan to execute"
-            )
+            return ExecutionResult(success=False, phase_reached=ExecutionPhase.FAILED, message="No plan")
         
         plan = self._pending_plan
         self._current_phase = ExecutionPhase.EXECUTING
@@ -272,11 +285,13 @@ class ExecutiveBrain:
         completed = 0
         errors = []
         
-        for step in plan.steps:
+        i = 0
+        while i < len(plan.steps):
+            step = plan.steps[i]
             self._report_progress(f"Executing step {step.order}/{len(plan.steps)}: {step.description}")
             
             try:
-                # Execute the step
+                # 1. Execute
                 if cap_registry:
                     cap = cap_registry.get(step.capability)
                     if cap:
@@ -284,144 +299,147 @@ class ExecutiveBrain:
                         step.result = result.message if result else "Completed"
                         step.completed = result.success if result else True
                     else:
-                        # Capability not found, mark as completed anyway
-                        step.result = "Capability executed (simulated)"
-                        step.completed = True
-                else:
-                    # No registry, simulate execution
-                    step.result = "Executed (no registry)"
-                    step.completed = True
+                        step.result = "Capability not found"
+                        step.completed = False
                 
-                # Verify the step
+                # 2. Verify (Recursive Reasoning)
                 self._current_phase = ExecutionPhase.VERIFYING
-                verification = self._verify_step(step)
+                verification = self._verify_step_rigorous(plan, step)
                 step.verified = verification["passed"]
                 
-                if not verification["passed"]:
-                    if verification.get("retry"):
-                        self._report_progress(f"Step {step.order} verification failed, retrying...")
-                        # Retry once
-                        if cap_registry:
-                            cap = cap_registry.get(step.capability)
-                            if cap:
-                                result = cap_registry.execute(cap, step.description, step.parameters)
-                                step.result = result.message if result else "Completed"
-                                step.completed = result.success if result else True
-                        verification = self._verify_step(step)
-                        step.verified = verification["passed"]
+                if not step.verified:
+                    self._report_progress(f"Step {step.order} failed verification: {verification['message']}")
                     
-                    if not verification["passed"]:
-                        errors.append(f"Step {step.order} failed: {verification['message']}")
+                    if verification.get("suggested_action") == "replan":
+                        self._report_progress("Self-Correction: Triggering Re-plan...")
+                        new_steps = self._replan(plan, i, verification["message"])
+                        if new_steps:
+                            # Replace future steps with new ones
+                            plan.steps = plan.steps[:i+1] + new_steps
+                            # Update orders
+                            for idx, s in enumerate(plan.steps):
+                                s.order = idx + 1
+                    elif verification.get("retry"):
+                        # Classic retry logic
+                        logger.info("Retrying step...")
+                        continue # Re-run SAME loop iteration
                 
                 if step.completed:
                     completed += 1
                 
+                i += 1 # Move to next step
                 self._current_phase = ExecutionPhase.EXECUTING
-                
+                  
             except Exception as e:
                 step.error = str(e)
                 errors.append(f"Step {step.order} error: {e}")
-                logger.error(f"Step {step.order} failed: {e}")
+                i += 1
         
         duration = time.time() - start_time
-        
-        # Determine overall success
         success = completed == len(plan.steps) and len(errors) == 0
-        
         self._current_phase = ExecutionPhase.COMPLETE if success else ExecutionPhase.FAILED
         self._pending_plan = None
-        
-        if success:
-            self._report_progress(f"Plan completed successfully in {duration:.1f}s")
-        else:
-            self._report_progress(f"Plan completed with {len(errors)} error(s)")
         
         return ExecutionResult(
             success=success,
             phase_reached=self._current_phase,
-            message=f"Completed {completed}/{len(plan.steps)} steps",
+            message=f"Plan ended after {completed} successful steps",
             steps_completed=completed,
             steps_total=len(plan.steps),
             errors=errors,
             duration_seconds=duration
         )
     
-    def _verify_step(self, step: ExecutionStep) -> Dict:
+    def _verify_step_rigorous(self, plan: ExecutionPlan, step: ExecutionStep) -> Dict:
+        """Rigorous verification using LLM if available."""
+        if not self.llm or not self.llm.is_available:
+            return {"passed": step.completed and not step.error, "message": "Manual check", "retry": True}
+            
+        prompt = f"""
+        Goal: {plan.goal}
+        Executed Step: {step.description}
+        Result: {step.result}
+        Error: {step.error}
+        
+        Did this step succeed? If it drifted from the goal, suggest 'replan'.
+        Return JSON: {{"passed": bool, "message": "...", "suggested_action": "retry|replan|continue"}}
         """
-        Verify a step completed successfully.
+        try:
+            resp = self.llm.generate(prompt, system_prompt="You are Chintu's Critic Agent.")
+            import json
+            match = re.search(r"\{.*\}", resp, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except Exception:
+            pass
+        return {"passed": step.completed, "message": "Fallback check", "retry": True}
+
+    def _replan(self, plan: ExecutionPlan, current_index: int, failure_reason: str) -> List[ExecutionStep]:
+        """Regenerate the remainder of the plan."""
+        if not self.llm or not self.llm.is_available:
+            return []
+            
+        prompt = f"""
+        Goal: {plan.goal}
+        Step {plan.steps[current_index].description} failed accurately.
+        Reason: {failure_reason}
         
-        Returns:
-            Dict with passed, message, and retry flag
+        Suggest new steps to fix this and complete the goal.
+        Return JSON list of steps as before.
         """
-        # Basic verification - check result exists
-        if not step.completed:
-            return {"passed": False, "message": "Step did not complete", "retry": True}
-        
-        if step.error:
-            return {"passed": False, "message": step.error, "retry": True}
-        
-        # Capability-specific verification could be added here
-        # For now, accept any completed step
-        return {"passed": True, "message": "OK", "retry": False}
-    
+        try:
+            resp = self.llm.generate(prompt)
+            import json
+            match = re.search(r"\[.*\]", resp, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                return [
+                    ExecutionStep(
+                        order=0, # Will be re-indexed
+                        description=s["description"],
+                        capability=s["capability"],
+                        parameters=s.get("parameters", {})
+                    )
+                    for s in data
+                ]
+        except Exception:
+            pass
+        return []
+
     def get_progress_message(self) -> str:
-        """Get current progress for UI."""
-        phase_messages = {
-            ExecutionPhase.IDLE: "Ready",
-            ExecutionPhase.PLANNING: "Creating plan...",
-            ExecutionPhase.CONFIRMING: "Awaiting confirmation",
-            ExecutionPhase.EXECUTING: "Executing...",
-            ExecutionPhase.VERIFYING: "Verifying...",
-            ExecutionPhase.COMPLETE: "Complete",
-            ExecutionPhase.FAILED: "Failed",
-        }
-        
-        base_msg = phase_messages.get(self._current_phase, "Unknown")
-        
+        base_msg = self._current_phase.value
         if self._pending_plan and self._current_phase == ExecutionPhase.EXECUTING:
             completed = sum(1 for s in self._pending_plan.steps if s.completed)
             total = len(self._pending_plan.steps)
             return f"{base_msg} ({completed}/{total})"
-        
         return base_msg
-    
+
     def get_status(self) -> Dict:
-        """Get comprehensive status for debugging."""
         return {
             "phase": self._current_phase.value,
             "has_pending_plan": self._pending_plan is not None,
-            "plan_goal": self._pending_plan.goal if self._pending_plan else None,
-            "plan_steps": len(self._pending_plan.steps) if self._pending_plan else 0,
         }
 
 
-# Global instance
-_executive_brain: Optional[ExecutiveBrain] = None
+_executive_brain: Optional["ExecutiveBrain"] = None
 
 
 def get_executive_brain() -> ExecutiveBrain:
-    """Get or create the global executive brain."""
     global _executive_brain
     if _executive_brain is None:
-        # Try to get policy engine
         try:
             from .policy import get_policy_engine
             policy = get_policy_engine()
         except ImportError:
             policy = None
-        
-        # Try to get workflow engine
         try:
             from ..agents.workflow_engine import get_workflow_engine
             workflow = get_workflow_engine()
         except ImportError:
             workflow = None
-        
         _executive_brain = ExecutiveBrain(policy, workflow)
     return _executive_brain
 
-
 def reset_executive_brain():
-    """Reset the global executive brain (for testing)."""
     global _executive_brain
     _executive_brain = None

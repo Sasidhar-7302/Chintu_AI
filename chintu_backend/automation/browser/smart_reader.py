@@ -7,7 +7,7 @@ import asyncio
 import time
 from typing import Dict, Any, Optional
 from ...core.events import Event, EventType, get_event_bus
-from ..automation.screen_control import get_screen_controller
+from ..screen_control import get_screen_controller
 
 logger = logging.getLogger(__name__)
 

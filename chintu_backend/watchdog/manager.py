@@ -8,6 +8,7 @@ import socket
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -160,6 +161,10 @@ class ProjectWatchdogManager:
         self._thread.start()
         self._running = True
         self.state_manager.update_feature("watchdog", enabled=True, status="active")
+        try:
+            self._ensure_reliability_watchdog()
+        except Exception:
+            pass
         return True, "Watchdogs started"
 
     def stop(self) -> None:
@@ -180,8 +185,8 @@ class ProjectWatchdogManager:
         interval_seconds: Optional[float] = None,
     ) -> WatchdogEntry:
         kind = (kind or "").strip().lower()
-        if kind not in {"http", "port", "process"}:
-            raise ValueError("kind must be one of: http, port, process")
+        if kind not in {"http", "port", "process", "eval", "metrics", "reliability"}:
+            raise ValueError("kind must be one of: http, port, process, eval, metrics, reliability")
         interval = float(interval_seconds or self.config.watchdog_interval_seconds)
         entry_name = (name or target).strip()[:80]
         entry = self.store.add(entry_name, kind, target.strip(), interval)
@@ -193,6 +198,24 @@ class ProjectWatchdogManager:
             }
         )
         return entry
+
+    def _ensure_reliability_watchdog(self) -> None:
+        """Auto-register reliability gate watchdog when enabled."""
+        config = self.config
+        if not (
+            getattr(config, "reliability_gate_enabled", False)
+            or getattr(config, "eval_gate_enabled", False)
+            or getattr(config, "metrics_gate_enabled", False)
+        ):
+            return
+
+        existing = self.store.list()
+        for entry in existing:
+            if entry.kind in {"reliability", "eval", "metrics"}:
+                return
+
+        interval = float(getattr(config, "reliability_gate_interval_seconds", 300.0))
+        self.store.add("reliability_gate", "reliability", "default", interval)
 
     def remove_watchdog(self, identifier: str) -> int:
         removed = self.store.remove(identifier)
@@ -247,6 +270,12 @@ class ProjectWatchdogManager:
             return self._check_port(entry.target)
         if entry.kind == "process":
             return self._check_process(entry.target)
+        if entry.kind == "eval":
+            return self._check_eval(entry.target)
+        if entry.kind == "metrics":
+            return self._check_metrics(entry.target)
+        if entry.kind == "reliability":
+            return self._check_reliability(entry.target)
         return False, f"Unknown watchdog kind: {entry.kind}"
 
     def _check_http(self, url: str) -> Tuple[bool, str]:
@@ -280,6 +309,53 @@ class ProjectWatchdogManager:
             return False, f"Process not found: {process_name}"
         except Exception as exc:  # noqa: BLE001
             return False, f"Process check failed: {exc}"
+
+    def _check_eval(self, target: str) -> Tuple[bool, str]:
+        """Run eval gate; target may be a path to cases.jsonl or 'default'."""
+        try:
+            from chintu_backend.eval.gates import run_eval_gate
+            from chintu_backend.core.config import get_config
+
+            config = get_config()
+            cases_path = Path(target) if target and target != "default" else getattr(config, "eval_cases_path", None)
+            result = run_eval_gate(cases_path=cases_path, min_score=getattr(config, "eval_min_score", 0.8))
+            self._update_reliability_status(result.passed, result.message)
+            return result.passed, result.message
+        except Exception as exc:  # noqa: BLE001
+            self._update_reliability_status(False, f"Eval check failed: {exc}")
+            return False, f"Eval check failed: {exc}"
+
+    def _check_metrics(self, _target: str) -> Tuple[bool, str]:
+        """Run telemetry metrics gate."""
+        try:
+            from chintu_backend.eval.gates import run_metrics_gate
+
+            result = run_metrics_gate()
+            self._update_reliability_status(result.passed, result.message)
+            return result.passed, result.message
+        except Exception as exc:  # noqa: BLE001
+            self._update_reliability_status(False, f"Metrics gate failed: {exc}")
+            return False, f"Metrics gate failed: {exc}"
+
+    def _check_reliability(self, _target: str) -> Tuple[bool, str]:
+        """Run combined reliability gate (eval + metrics)."""
+        try:
+            from chintu_backend.eval.gates import run_reliability_gate
+
+            result = run_reliability_gate()
+            self._update_reliability_status(result.passed, result.message)
+            return result.passed, result.message
+        except Exception as exc:  # noqa: BLE001
+            self._update_reliability_status(False, f"Reliability gate failed: {exc}")
+            return False, f"Reliability gate failed: {exc}"
+
+    def _update_reliability_status(self, ok: bool, message: str) -> None:
+        try:
+            status = "active" if ok else "testing"
+            error = None if ok else str(message)[:200]
+            self.state_manager.update_feature("reliability", enabled=True, status=status, error=error)
+        except Exception:
+            return
 
     def _maybe_alert(self, entry: WatchdogEntry, failures: int, message: str) -> None:
         if failures < int(self.config.watchdog_failure_threshold):

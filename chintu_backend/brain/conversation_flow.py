@@ -43,9 +43,47 @@ class ConversationFlow:
         if len(self._history) > self.max_history * 2:
             self._history = self._history[-(self.max_history * 2):]
 
-    def get_context(self) -> List[Dict[str, str]]:
-        """Get current conversation context for LLM."""
-        return [{"role": m["role"], "content": m["content"]} for m in self._history]
+    def get_context(self, current_query: Optional[str] = None) -> List[Dict[str, str]]:
+        """
+        Get current conversation context for LLM.
+        Includes Short-Term history + Long-Term RAG.
+        """
+        messages = [{"role": m["role"], "content": m["content"]} for m in self._history]
+        
+        # 1. Retrieve detailed long-term memory if query matches
+        if self.memory_manager and current_query:
+            try:
+                # Use searchable memory if available (Phase 3)
+                relevant_memories = []
+                
+                # Check if it has the new search method (Phase 3 Upgrade)
+                if hasattr(self.memory_manager, 'search'):
+                    # Deterministic search
+                    results = self.memory_manager.search(current_query, limit=3)
+                    if results:
+                        relevant_memories = [
+                            f"[Memory {r.created_at[:10]}] {r.content}" for r in results
+                        ]
+                else:
+                    # Fallback to legacy string context
+                    ctx_str = self.memory_manager.retrieve_context(current_query, n_results=3)
+                    if ctx_str:
+                        relevant_memories = ctx_str.split("\n")
+
+                if relevant_memories:
+                    # Inject as system message or context
+                    memory_block = "\n".join(relevant_memories)
+                    system_msg = {
+                        "role": "system", 
+                        "content": f"Relevant Past Memories:\n{memory_block}"
+                    }
+                    # Insert before history
+                    messages.insert(0, system_msg)
+                    logger.info(f"Injected {len(relevant_memories)} memories into context.")
+            except Exception as e:
+                logger.warning(f"Memory retrieval failed: {e}")
+                
+        return messages
     
     def clear_context(self):
         """Reset conversation context (e.g. after long idle)."""

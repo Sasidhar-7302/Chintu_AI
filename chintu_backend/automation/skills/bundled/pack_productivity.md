@@ -3,7 +3,7 @@
 # Notion
 Description: Create or search notes in Notion (requires Notion token).
 Triggers: notion, notion note, notion search
-Command: python -m chintu_backend.skills.tools.notion "{query}"
+Command: python -m chintu_backend.integrations.notion "{query}"
 Args: query
 Type: shell
 Requires-Env: NOTION_TOKEN

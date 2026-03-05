@@ -17,14 +17,54 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from collections import OrderedDict
 
-try:
-    import chromadb
-    from chromadb.utils import embedding_functions
-    HAS_CHROMA = True
-except ImportError:
-    HAS_CHROMA = False
-
 logger = logging.getLogger(__name__)
+HAS_CHROMA = False
+_CHROMA_IMPORT_ERROR: Optional[Exception] = None
+
+
+def _import_chromadb() -> None:
+    """Import ChromaDB with a NumPy 2.x compatibility shim fallback."""
+    global HAS_CHROMA, _CHROMA_IMPORT_ERROR, chromadb, embedding_functions
+
+    # Keep Chroma telemetry quiet and robust across posthog version differences.
+    os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+    try:
+        import posthog  # type: ignore
+
+        posthog.disabled = True
+        if hasattr(posthog, "capture"):
+            posthog.capture = lambda *args, **kwargs: None  # type: ignore[assignment]
+    except Exception:
+        pass
+
+    try:
+        import chromadb  # type: ignore
+        from chromadb.utils import embedding_functions  # type: ignore
+
+        HAS_CHROMA = True
+        _CHROMA_IMPORT_ERROR = None
+        return
+    except Exception as exc:
+        _CHROMA_IMPORT_ERROR = exc
+
+    # Retry once with a compatibility alias for old Chroma releases on NumPy 2.x.
+    try:
+        import numpy as _np  # type: ignore
+
+        if not hasattr(_np, "float_"):
+            setattr(_np, "float_", _np.float64)
+
+        import chromadb  # type: ignore
+        from chromadb.utils import embedding_functions  # type: ignore
+
+        HAS_CHROMA = True
+        _CHROMA_IMPORT_ERROR = None
+    except Exception as retry_exc:
+        HAS_CHROMA = False
+        _CHROMA_IMPORT_ERROR = retry_exc
+
+
+_import_chromadb()
 
 
 class LRUCache:
@@ -110,14 +150,24 @@ class MemoryManager:
         self._init_profile()
 
     def _read_redirect_path(self, base_path: str) -> Optional[str]:
-        """Read redirect path if a previous schema reset created a fresh store."""
+        """Resolve chained redirect paths from prior schema-reset migrations."""
         try:
-            redirect_file = f"{base_path}.redirect"
-            if os.path.exists(redirect_file):
+            current = base_path
+            visited = {str(base_path)}
+            for _ in range(8):  # Prevent infinite loops on malformed redirects.
+                redirect_file = f"{current}.redirect"
+                if not os.path.exists(redirect_file):
+                    break
                 with open(redirect_file, "r", encoding="utf-8") as f:
                     target = f.read().strip()
-                if target:
-                    return target
+                if not target:
+                    break
+                if target in visited:
+                    break
+                visited.add(target)
+                current = target
+            if current and current != base_path:
+                return current
         except Exception:
             pass
         return None
@@ -125,7 +175,10 @@ class MemoryManager:
     def _init_db(self):
         """Initialize ChromaDB client."""
         if not HAS_CHROMA:
-            logger.warning("ChromaDB not installed. Memory features disabled.")
+            if _CHROMA_IMPORT_ERROR:
+                logger.warning("ChromaDB unavailable (%s). Memory features disabled.", _CHROMA_IMPORT_ERROR)
+            else:
+                logger.warning("ChromaDB unavailable. Memory features disabled.")
             return
 
         try:

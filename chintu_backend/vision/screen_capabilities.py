@@ -8,23 +8,52 @@ Provides voice commands for:
 
 import logging
 from typing import Dict, Any, Optional, Tuple
+from pydantic import BaseModel, Field
 
 from ..core.capabilities import ActionResult
 
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# SCHEMAS
+# ============================================================================
+
+class WhatsOnScreenSchema(BaseModel):
+    pass
+
+class TakeScreenshotSchema(BaseModel):
+    pass
+
+class FindElementSchema(BaseModel):
+    element_name: str = Field(..., description="The UI element to find (e.g. 'submit button', 'search bar').")
+
+class ReadScreenTextSchema(BaseModel):
+    pass
+
+class ScreenClickSchema(BaseModel):
+    target: str = Field(..., description="The visual element to click on.")
+
+class CopyToClipboardSchema(BaseModel):
+    pass
+
+class PasteFromClipboardSchema(BaseModel):
+    pass
+
+
+def get_screen_manager():
+    """Wrapper for screen manager to allow tests to patch this module."""
+    from .screen_capture import get_screen_manager as _get_screen_manager
+    return _get_screen_manager()
+
+
+def get_omniparser():
+    """Wrapper for omniparser to allow tests to patch this module."""
+    from .omniparser import get_omniparser as _get_omniparser
+    return _get_omniparser()
+
 
 def handle_whats_on_screen(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Describe what's visible on the screen.
-    
-    Examples:
-    - "What's on my screen?"
-    - "What am I looking at?"
-    - "Describe my screen"
-    """
-    from .screen_capture import get_screen_manager
-    from .omniparser import get_omniparser
-    
+    """Describe what's visible on the screen."""
     screen_manager = get_screen_manager()
     parser = get_omniparser()
     
@@ -43,11 +72,43 @@ def handle_whats_on_screen(text: str, context: Dict[str, Any]) -> ActionResult:
         
         if "error" not in analysis:
             description = analysis.get("description", "I see your screen.")
-            text_content = analysis.get("text_content", "")
-            elements = len(analysis.get("elements", []))
+            text_content = str(analysis.get("text_content", "") or "").strip()
+            element_items = analysis.get("elements", []) or []
+            actions = analysis.get("actions", []) or []
+
+            parts = [description.strip()]
+
+            # Summarize key UI elements in a human way instead of raw counts.
+            element_names = []
+            for item in element_items[:5]:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or item.get("text") or "").strip()
+                else:
+                    name = str(item).strip()
+                if name:
+                    element_names.append(name)
+            if element_names:
+                parts.append("Key elements: " + ", ".join(element_names))
+
+            if actions:
+                action_text = ", ".join(str(a).strip() for a in actions[:4] if str(a).strip())
+                if action_text:
+                    parts.append("You can: " + action_text)
+
+            if text_content:
+                snippet = text_content if len(text_content) <= 220 else text_content[:220] + "..."
+                parts.append("Readable text: " + snippet)
+
+            # Always include running apps as grounding context.
+            from ..platform.window_manager import get_window_manager
+            window_summary = get_window_manager().get_window_summary()
+            if window_summary:
+                parts.append("Running apps: " + window_summary)
+
+            response_text = "\n\n".join(p for p in parts if p)
             
             return ActionResult.ok(
-                f"{description}\n\nVisible elements: {elements}",
+                response_text,
                 {"analysis": analysis, "path": str(capture.path)},
                 "whats_on_screen"
             )
@@ -82,15 +143,7 @@ def handle_whats_on_screen(text: str, context: Dict[str, Any]) -> ActionResult:
 
 
 def handle_take_screenshot(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Take and save a screenshot.
-    
-    Examples:
-    - "Take a screenshot"
-    - "Capture my screen"
-    - "Screenshot this"
-    """
-    from .screen_capture import get_screen_manager
-    
+    """Take and save a screenshot."""
     screen_manager = get_screen_manager()
     
     # Capture and save
@@ -110,15 +163,7 @@ def handle_take_screenshot(text: str, context: Dict[str, Any]) -> ActionResult:
 
 
 def handle_read_screen_text(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Read text visible on the screen using OCR.
-    
-    Examples:
-    - "Read what's on screen"
-    - "What text is visible?"
-    - "Read the screen text"
-    """
-    from .screen_capture import get_screen_manager
-    
+    """Read text visible on the screen using OCR."""
     screen_manager = get_screen_manager()
     
     # Capture the current screen
@@ -148,13 +193,7 @@ def handle_read_screen_text(text: str, context: Dict[str, Any]) -> ActionResult:
 
 
 def handle_copy_to_clipboard(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Copy text to the clipboard.
-    
-    Examples:
-    - "Copy that"
-    - "Copy the last response"
-    - "Put that in my clipboard"
-    """
+    """Copy text to the clipboard."""
     try:
         import pyperclip
         
@@ -191,13 +230,7 @@ def handle_copy_to_clipboard(text: str, context: Dict[str, Any]) -> ActionResult
 
 
 def handle_paste_from_clipboard(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Read what's in the clipboard.
-    
-    Examples:
-    - "What's in my clipboard?"
-    - "Read my clipboard"
-    - "Paste"
-    """
+    """Read what's in the clipboard."""
     try:
         import pyperclip
         
@@ -236,9 +269,6 @@ def handle_paste_from_clipboard(text: str, context: Dict[str, Any]) -> ActionRes
 
 def find_coordinates(target_text: str) -> Optional[Tuple[int, int]]:
     """Helper to find pixel coordinates of a text/element on screen."""
-    from .screen_capture import get_screen_manager
-    from .omniparser import get_omniparser
-    
     screen_manager = get_screen_manager()
     parser = get_omniparser()
     
@@ -264,30 +294,29 @@ def find_coordinates(target_text: str) -> Optional[Tuple[int, int]]:
 
 
 def handle_find_element(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Find a UI element on the screen using Vision.
-    
-    Examples:
-    - "Find the submit button"
-    - "Where is the search bar?"
-    - "Locate the login link"
-    """
-    from .screen_capture import get_screen_manager
-    from .omniparser import get_omniparser
-    
+    """Find a UI element on the screen using Vision."""
     # Extract element name from text
     import re
-    element = text
-    patterns = [
-        r"find\s+(?:the\s+)?(.+)",
-        r"where\s+is\s+(?:the\s+)?(.+)",
-        r"locate\s+(?:the\s+)?(.+)"
-    ]
+    element = None
     
-    for p in patterns:
-        match = re.search(p, text.lower())
-        if match:
-            element = match.group(1).strip()
-            break
+    validated = context.get("_validated_params")
+    if validated and isinstance(validated, FindElementSchema):
+        element = validated.element_name
+        
+    if not element:
+        # Legacy
+        element = text
+        patterns = [
+            r"find\s+(?:the\s+)?(.+)",
+            r"where\s+is\s+(?:the\s+)?(.+)",
+            r"locate\s+(?:the\s+)?(.+)"
+        ]
+        
+        for p in patterns:
+            match = re.search(p, text.lower())
+            if match:
+                element = match.group(1).strip()
+                break
             
     screen_manager = get_screen_manager()
     parser = get_omniparser()
@@ -296,7 +325,7 @@ def handle_find_element(text: str, context: Dict[str, Any]) -> ActionResult:
     capture = screen_manager.capture_screen(save=True)
     
     if not capture:
-        return ActionResult.fail("Couldn't capture screen.", "find_element")
+        return ActionResult.fail("Capture failed: couldn't capture screen.", "find_element")
         
     try:
         # Ask OmniParser
@@ -321,31 +350,78 @@ def handle_find_element(text: str, context: Dict[str, Any]) -> ActionResult:
 
 
 def handle_screen_click(text: str, context: Dict[str, Any]) -> ActionResult:
-    """Click a UI element on the screen using Visual Grounding.
-    
-    Examples:
-    - "Click the submit button"
-    - "Click search"
-    - "Click on login"
-    """
+    """Click a UI element on the screen using Visual Grounding."""
     import pyautogui
-    from .screen_capture import get_screen_manager
-    from .omniparser import get_omniparser
     
     # Extract element name
     import re
-    element = text
-    patterns = [
-        r"click\s+(?:on\s+)?(?:the\s+)?(.+)",
-    ]
+    element = None
     
-    for p in patterns:
-        match = re.search(p, text.lower())
-        if match:
-            element = match.group(1).strip()
-            break
-            
+    validated = context.get("_validated_params")
+    if validated and isinstance(validated, ScreenClickSchema):
+        element = validated.target
+
+    if not element:
+        # Legacy
+        element = text
+        patterns = [
+            r"click\s+(?:on\s+)?(?:the\s+)?(.+)",
+        ]
+        
+        for p in patterns:
+            match = re.search(p, text.lower())
+            if match:
+                element = match.group(1).strip()
+                break
+
+    element = (element or "").strip().strip("\"'")
+    if not element:
+        return ActionResult.fail("Which element should I click?", "screen_click")
+
+    # Hard safety layer: payment and submit/publish actions require explicit approval.
+    try:
+        from chintu_backend.policy.action_risk import detect_action_categories
+        from chintu_backend.security.payment_guard import detect_payment_signal
+
+        signal = detect_payment_signal(element)
+        categories = detect_action_categories("screen_click", element, context)
+        if signal.matched:
+            keyword = signal.keyword or "payment"
+            return ActionResult.fail(
+                f"Blocked by policy: payment/checkout actions are disabled ('{keyword}').",
+                "screen_click",
+            )
+        if "browser_submit" in categories and not context.get("_submit_confirmed"):
+            def pending_submit() -> ActionResult:
+                ctx = dict(context or {})
+                ctx["_submit_confirmed"] = True
+                return handle_screen_click(text, ctx)
+
+            return ActionResult.confirm(
+                f"This looks like a sensitive submit/publish action ('{element}'). Confirm before I continue.",
+                pending_submit,
+                "screen_click",
+            )
+    except Exception:
+        pass
+
     # Step 1: Find coordinates
+    coords = None
+
+    # Native UI (Windows UIA) is faster and more reliable when available.
+    try:
+        from ..automation.native_control import get_native_controller
+
+        native_ctrl = get_native_controller()
+        if getattr(native_ctrl, "enabled", False) and native_ctrl.find_and_click(element):
+            return ActionResult.ok(
+                f"Clicked '{element}' using Native/Accessibility control.",
+                {"element": element, "method": "native_uia"},
+                "screen_click",
+            )
+    except Exception:
+        pass
+
     coords = find_coordinates(element)
     
     if not coords:
@@ -390,7 +466,7 @@ def register_screen_capabilities():
         description="Describe what's visible on the screen",
         capability_type=CapabilityType.SYSTEM,
         examples=["What's on my screen?", "What am I looking at?"],
-
+        schema=WhatsOnScreenSchema
     ))
     
     # Take screenshot
@@ -406,7 +482,7 @@ def register_screen_capabilities():
         description="Take and save a screenshot",
         capability_type=CapabilityType.SYSTEM,
         examples=["Take a screenshot", "Capture my screen"],
-
+        schema=TakeScreenshotSchema
     ))
     
     # Find element (Antigravity)
@@ -421,7 +497,7 @@ def register_screen_capabilities():
         description="Locate UI element on screen",
         capability_type=CapabilityType.SYSTEM,
         examples=["Find the submit button", "Where is the search bar"],
-
+        schema=FindElementSchema
     ))
     
     # Read screen text
@@ -438,7 +514,7 @@ def register_screen_capabilities():
         description="Read text visible on the screen using OCR",
         capability_type=CapabilityType.SYSTEM,
         examples=["Read the text on screen", "What text is visible?"],
-
+        schema=ReadScreenTextSchema
     ))
     
     # Copy to clipboard
@@ -454,7 +530,7 @@ def register_screen_capabilities():
         description="Copy text to the clipboard",
         capability_type=CapabilityType.SYSTEM,
         examples=["Copy that", "Copy the last response"],
-
+        schema=CopyToClipboardSchema
     ))
     
     # Paste/read clipboard
@@ -470,7 +546,7 @@ def register_screen_capabilities():
         description="Read what's in the clipboard",
         capability_type=CapabilityType.SYSTEM,
         examples=["What's in my clipboard?", "Read my clipboard"],
-
+        schema=PasteFromClipboardSchema
     ))
     
     # Screen Click (VLA)
@@ -486,6 +562,7 @@ def register_screen_capabilities():
         description="Click a UI element using visual search",
         capability_type=CapabilityType.SYSTEM,
         examples=["Click the submit button", "Click on search"],
+        schema=ScreenClickSchema
     ))
     
     logger.info("Registered screen capabilities")

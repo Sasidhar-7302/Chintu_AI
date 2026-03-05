@@ -22,10 +22,6 @@ from .logging_config import (
     StructuredLogger, new_trace_id, get_trace_id, timed,
     ErrorCategory, categorize_error
 )
-from .executive import (
-    ExecutiveBrain, ExecutionPhase, ExecutionPlan, ExecutionResult,
-    get_executive_brain
-)
 
 __all__ = [
     # Original exports
@@ -48,8 +44,4 @@ __all__ = [
     "MetricsCollector", "get_metrics",
     "StructuredLogger", "new_trace_id", "get_trace_id", "timed",
     "ErrorCategory", "categorize_error",
-    
-    # Executive Brain
-    "ExecutiveBrain", "ExecutionPhase", "ExecutionPlan", "ExecutionResult",
-    "get_executive_brain",
 ]

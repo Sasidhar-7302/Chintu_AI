@@ -6,6 +6,7 @@ import os
 import platform
 from typing import Optional, Dict
 import logging
+import shlex
 
 logger = logging.getLogger(__name__)
 
@@ -122,16 +123,30 @@ class AppLauncher:
                 os.startfile(command)
             else:
                 # Try to start the application
+                # Try to start the application
                 if self._is_windows:
+                    # Audit Fix: Avoid shell=True for security
+                    # Use shlex to parse command string safely into args list
+                    try:
+                        args = shlex.split(command, posix=False)
+                    except Exception:
+                        # Fallback for simple commands
+                        args = [command]
+                        
                     subprocess.Popen(
-                        command,
-                        shell=True,
+                        args,
+                        shell=False,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
                 else:
+                    try:
+                        args = shlex.split(command)
+                    except Exception:
+                        args = [command]
+                        
                     subprocess.Popen(
-                        [command],
+                        args,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )

@@ -242,6 +242,53 @@ class A2UIService:
         )
         self.render_view(view)
 
+    def render_plan_canvas(
+        self,
+        goal: str,
+        steps: List[str],
+        *,
+        risk: str = "low",
+        eta_seconds: int = 0,
+        view_id: Optional[str] = None,
+    ) -> None:
+        """Render a lightweight plan canvas view for executive plans."""
+        items = [{"key": "Goal", "value": goal}]
+        if eta_seconds:
+            items.append({"key": "ETA", "value": f"~{eta_seconds}s"})
+        items.append({"key": "Risk", "value": risk})
+        steps_text = "\n".join(f"{idx+1}. {step}" for idx, step in enumerate(steps)) or "No steps found."
+
+        view = A2UIView(
+            id=view_id or "canvas:plan",
+            kind="canvas",
+            title="Execution Plan Canvas",
+            description="Review the plan and confirm to proceed.",
+            components=[
+                A2UIComponent(type="key_value", data={"items": items}),
+                A2UIComponent(type="markdown", text=steps_text),
+            ],
+            actions=[
+                A2UIAction(
+                    id="executive.confirm",
+                    label="Confirm Plan",
+                    style="primary",
+                    requires_confirmation=True,
+                    confirmation_message="Start executing this plan now?",
+                ),
+                A2UIAction(
+                    id="executive.cancel",
+                    label="Cancel",
+                    style="secondary",
+                ),
+                A2UIAction(
+                    id="a2ui.dismiss:canvas:plan",
+                    label="Dismiss",
+                    style="secondary",
+                ),
+            ],
+        )
+        self.render_view(view)
+
     def render_credential_prompt(
         self,
         keys: List[str],
@@ -642,6 +689,39 @@ class A2UIService:
             self.action_result(action_id, True, "Approved.", view_id=view_id)
             return
 
+        if action_id == "executive.confirm":
+            try:
+                from chintu_backend.core.executive import get_executive_brain
+                from chintu_backend.core.capabilities import get_registry
+
+                executive = get_executive_brain()
+                if not executive.confirm_plan():
+                    self.action_result(action_id, False, "No pending plan to confirm.", view_id=view_id)
+                    return
+                result = executive.execute_plan(get_registry())
+                message = result.message
+                if result.errors:
+                    message += f" Errors: {', '.join(result.errors[:3])}"
+                self.clear_view(view_id or "canvas:plan")
+                self.toast(message, severity="success" if result.success else "warning")
+                self.action_result(action_id, result.success, message, view_id=view_id)
+            except Exception as exc:  # noqa: BLE001
+                self.action_result(action_id, False, f"Plan execution failed: {exc}", view_id=view_id)
+            return
+
+        if action_id == "executive.cancel":
+            try:
+                from chintu_backend.core.executive import get_executive_brain
+
+                executive = get_executive_brain()
+                executive.cancel_plan()
+                self.clear_view(view_id or "canvas:plan")
+                self.toast("Plan cancelled.", severity="warning")
+                self.action_result(action_id, True, "Plan cancelled.", view_id=view_id)
+            except Exception as exc:  # noqa: BLE001
+                self.action_result(action_id, False, f"Failed to cancel plan: {exc}", view_id=view_id)
+            return
+
         if action_id.startswith("coding.reject:"):
             request_id = action_id.split(":", 1)[1]
             self._publish_code_approval(request_id, approved=False)
@@ -654,6 +734,13 @@ class A2UIService:
             ok, message = self._handle_credential_inputs(target_view, data, view_id=view_id)
             if ok:
                 self.clear_view(view_id or target_view)
+                self.toast(message, severity="success")
+            self.action_result(action_id, ok, message, view_id=view_id)
+            return
+
+        if action_id == "news.feedback.submit":
+            ok, message = self._handle_news_feedback(data)
+            if ok:
                 self.toast(message, severity="success")
             self.action_result(action_id, ok, message, view_id=view_id)
             return
@@ -748,6 +835,40 @@ class A2UIService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to save credentials: %s", exc)
             return False, f"Failed to save credentials: {exc}"
+
+    def _handle_news_feedback(self, values: Dict[str, Any]) -> Tuple[bool, str]:
+        try:
+            from chintu_backend.automation.automation_capabilities import handle_morning_briefing_feedback
+        except Exception as exc:
+            return False, f"News feedback handler unavailable: {exc}"
+
+        number_raw = str(values.get("headline_number") or values.get("number") or "").strip()
+        sentiment = str(values.get("sentiment") or "like").strip().lower()
+        archive_full_article = bool(values.get("archive_full_article") or values.get("archive"))
+
+        if not number_raw:
+            return False, "Select a headline number."
+        try:
+            number = int(number_raw)
+        except Exception:
+            return False, "Headline number must be numeric."
+        if number <= 0:
+            return False, "Headline number must be greater than zero."
+
+        if sentiment in {"dislike", "less", "negative", "downvote"}:
+            feedback_text = f"not interested in #{number}"
+        else:
+            feedback_text = f"I like #{number}"
+            if archive_full_article:
+                feedback_text = f"{feedback_text} and archive full article"
+
+        result = handle_morning_briefing_feedback(
+            feedback_text,
+            {"archive_full_article": archive_full_article},
+        )
+        if bool(getattr(result, "success", False)):
+            return True, str(getattr(result, "message", "") or "Feedback saved.")
+        return False, str(getattr(result, "message", "") or "Could not save feedback.")
 
     @staticmethod
     def _save_env_vars(values: Dict[str, str]) -> None:

@@ -307,22 +307,23 @@ def register_temporal_capabilities():
 
     ))
     
-    # Remember that...
-    registry.register(Capability(
-        name="remember_fact",
-        handler=handle_remember_fact,
-        triggers=[
-            "remember that",
-            "remember i",
-            "remember my",
-            "note that",
-            "save that",
-        ],
-        description="Store a fact in memory",
-        capability_type=CapabilityType.MEMORY,
-        examples=["Remember that my birthday is May 15"],
+    # Remember that... (registered in memory_capabilities; avoid duplicate registration)
+    if registry.get("remember_fact") is None:
+        registry.register(Capability(
+            name="remember_fact",
+            handler=handle_remember_fact,
+            triggers=[
+                "remember that",
+                "remember i",
+                "remember my",
+                "note that",
+                "save that",
+            ],
+            description="Store a fact in memory",
+            capability_type=CapabilityType.MEMORY,
+            examples=["Remember that my birthday is May 15"],
 
-    ))
+        ))
     
     # What do you know...
     registry.register(Capability(

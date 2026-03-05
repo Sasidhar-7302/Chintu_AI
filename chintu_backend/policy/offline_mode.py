@@ -6,6 +6,7 @@ Manages capability availability based on system state and connectivity.
 
 import socket
 import logging
+import urllib.request
 from enum import Enum
 from dataclasses import dataclass
 from typing import Dict, Set, Optional
@@ -82,10 +83,18 @@ class OfflineDegradedMode:
         self._manually_disabled: Set[str] = set()
         self._last_internet_check: float = 0
         self._internet_available: bool = True
-        self._check_interval: float = 15.0  # Check more frequently for faster recovery
+        self._check_interval: float = 15.0
         self._check_host = "8.8.8.8"
         self._check_port = 53
-        self._check_timeout = 1.0  # Reduced from 3.0s for faster checks
+        self._check_timeout = 2.0
+        self._http_probe_urls = (
+            "http://www.msftconnecttest.com/connecttest.txt",
+            "http://connectivitycheck.gstatic.com/generate_204",
+        )
+        self._failures_before_offline = 2
+        self._successes_before_online = 1
+        self._failed_checks = 0
+        self._successful_checks = 0
 
         try:
             from ..core.config import get_config
@@ -93,6 +102,13 @@ class OfflineDegradedMode:
             self._check_host = config.network_check_host
             self._check_port = config.network_check_port
             self._check_timeout = config.network_check_timeout_seconds
+            self._check_interval = float(getattr(config, "network_check_interval_seconds", self._check_interval))
+            self._failures_before_offline = int(
+                getattr(config, "network_check_failures_before_offline", self._failures_before_offline)
+            )
+            self._successes_before_online = int(
+                getattr(config, "network_check_successes_before_online", self._successes_before_online)
+            )
         except Exception:
             pass
 
@@ -112,6 +128,7 @@ class OfflineDegradedMode:
             ("208.67.222.222", 53),  # OpenDNS
         ]
         
+        probe_success = False
         for host, port in hosts_to_try:
             sock = None
             try:
@@ -119,7 +136,7 @@ class OfflineDegradedMode:
                     (host, port),
                     timeout=self._check_timeout,
                 )
-                self._internet_available = True
+                probe_success = True
                 break  # Success - stop trying
             except (socket.timeout, socket.error, OSError):
                 pass  # Try next host
@@ -129,18 +146,47 @@ class OfflineDegradedMode:
                         sock.close()
                     except OSError:
                         pass
-        else:
-            # All hosts failed
-            self._internet_available = False
+        if not probe_success:
+            # Fallback HTTP probe: helps when outbound DNS-port checks are blocked by network policy.
+            for probe_url in self._http_probe_urls:
+                try:
+                    with urllib.request.urlopen(probe_url, timeout=max(1.5, self._check_timeout)) as resp:
+                        if getattr(resp, "status", 200) in (200, 204):
+                            probe_success = True
+                            break
+                except Exception:
+                    continue
 
         self._last_internet_check = now
 
-        if not self._internet_available:
-            logger.warning("Internet connectivity check failed - switching to offline mode")
-            self._current_mode = SystemMode.OFFLINE
-        elif self._current_mode == SystemMode.OFFLINE:
-            logger.info("Internet restored - switching to full mode")
-            self._current_mode = SystemMode.FULL
+        if probe_success:
+            self._failed_checks = 0
+            self._successful_checks += 1
+            if self._current_mode == SystemMode.OFFLINE:
+                if self._successful_checks >= max(1, self._successes_before_online):
+                    self._internet_available = True
+                    self._current_mode = SystemMode.FULL
+                    logger.info("Internet restored - switching to full mode")
+                else:
+                    self._internet_available = False
+            else:
+                self._internet_available = True
+        else:
+            self._successful_checks = 0
+            self._failed_checks += 1
+            if self._failed_checks >= max(1, self._failures_before_offline):
+                if self._current_mode != SystemMode.OFFLINE:
+                    logger.warning("Internet connectivity check failed - switching to offline mode")
+                self._internet_available = False
+                self._current_mode = SystemMode.OFFLINE
+            else:
+                # Treat a single failed probe as transient; keep prior state.
+                logger.debug(
+                    "Transient internet probe failure (%d/%d). Keeping current mode '%s'.",
+                    self._failed_checks,
+                    self._failures_before_offline,
+                    self._current_mode.value,
+                )
 
         return self._internet_available
 

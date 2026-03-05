@@ -76,7 +76,7 @@ class WorkflowRunner:
         self._skill_cache: Optional[Dict[str, Any]] = None
 
     def run_file(
-        self,
+        self: "WorkflowRunner",
         file_path: str,
         args: Optional[Dict[str, Any]] = None,
         resume_token: Optional[str] = None,
@@ -177,7 +177,7 @@ class WorkflowRunner:
             return WorkflowRunResult(status="ok", output=outputs)
         return WorkflowRunResult(status="ok", output=output)
 
-    def resume(self, token: str, approved: Optional[bool], mode: str = "tool") -> WorkflowRunResult:
+    def resume(self: "WorkflowRunner", token: str, approved: Optional[bool], mode: str = "tool") -> WorkflowRunResult:
         return self.run_file(file_path="", resume_token=token, approved=approved, mode=mode)
 
     def _execute_command(
@@ -240,7 +240,8 @@ class WorkflowRunner:
         if cmd_type == "shell":
             if not self.config.skills_allow_shell:
                 raise ValueError("Shell execution blocked. Enable CHINTU_SKILLS_ALLOW_SHELL.")
-            return _run_shell(name, stdin_value, env, cwd)
+            command_text = name if not raw_args else f"{name} {raw_args}"
+            return _run_shell(command_text, stdin_value, env, cwd)
 
         raise ValueError(f"Unsupported command type: {cmd_type}")
 
@@ -304,12 +305,23 @@ def _extract_skill_args(arg_names: Iterable[str], raw_args: str) -> Dict[str, st
 
 def _run_shell(command: str, stdin_value: Optional[str], env: Dict[str, str], cwd: Optional[str]) -> Dict[str, Any]:
     import subprocess
+    import shlex
 
     merged_env = os.environ.copy()
     merged_env.update({k: str(v) for k, v in (env or {}).items() if v is not None})
+
+    # Security: avoid shell=True to prevent injection. Require explicit executable.
+    if any(op in command for op in ["|", "&", ";", ">", "<"]):
+        raise RuntimeError("Shell operators are disabled. Use explicit executables without pipes/redirection.")
+
+    try:
+        args = shlex.split(command, posix=os.name != "nt")
+    except Exception:
+        args = [command]
+
     result = subprocess.run(
-        command,
-        shell=True,
+        args,
+        shell=False,
         text=True,
         input=stdin_value or "",
         capture_output=True,

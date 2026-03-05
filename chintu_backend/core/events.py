@@ -11,11 +11,21 @@ logger = logging.getLogger(__name__)
 
 
 class EventType(Enum):
-    """Types of events in the system."""
+    """Types of events in the system.
+
+    NOTE: This is the *single* central event type enum for Chintu.
+    All subsystems (speech, UI, runs, scheduler, tasks, gateway, etc.)
+    should add their event types here rather than defining separate enums.
+    """
+
+    # ------------------------------------------------------------------
     # Wake Word Events
+    # ------------------------------------------------------------------
     WAKE_WORD_DETECTED = "wake_word_detected"
     
+    # ------------------------------------------------------------------
     # Speech Events
+    # ------------------------------------------------------------------
     SPEECH_START = "speech_start"
     SPEECH_END = "speech_end"
     TRANSCRIPT_READY = "transcript_ready"
@@ -23,29 +33,72 @@ class EventType(Enum):
     PUSH_TO_TALK_START = "push_to_talk_start"
     PUSH_TO_TALK_STOP = "push_to_talk_stop"
     
+    # ------------------------------------------------------------------
     # Gesture Events
+    # ------------------------------------------------------------------
     GESTURE_DETECTED = "gesture_detected"
     HAND_DETECTED = "hand_detected"
     HAND_LOST = "hand_lost"
     
-    # Command Events
+    # ------------------------------------------------------------------
+    # Command / Intent Events
+    # ------------------------------------------------------------------
     COMMAND_RECOGNIZED = "command_recognized"
     COMMAND_EXECUTED = "command_executed"
     COMMAND_FAILED = "command_failed"
     
+    # ------------------------------------------------------------------
     # LLM Events
+    # ------------------------------------------------------------------
     LLM_REQUEST = "llm_request"
     LLM_RESPONSE = "llm_response"
     LLM_STREAMING = "llm_streaming"
     
-    # State Events
+    # ------------------------------------------------------------------
+    # State / UI Events
+    # ------------------------------------------------------------------
     STATE_CHANGED = "state_changed"
     
-    # UI Events
     UI_CONNECTED = "ui_connected"
     UI_DISCONNECTED = "ui_disconnected"
+    TYPING_START = "typing_start"
+    TYPING_STOP = "typing_stop"
     ERROR = "error"
     NOTIFICATION = "notification"
+    CANVAS_UPDATE = "canvas_update"
+
+    # Messages (used by Scheduler + Gateway to simulate inbound text)
+    MESSAGE_RECEIVED = "message_received"
+    MESSAGE_SENT = "message_sent"
+
+    # ------------------------------------------------------------------
+    # System / Node Events
+    # ------------------------------------------------------------------
+    SYSTEM_STARTUP = "system_startup"
+    SYSTEM_SHUTDOWN = "system_shutdown"
+    NODE_CONNECTED = "node_connected"
+    NODE_DISCONNECTED = "node_disconnected"
+
+    # ------------------------------------------------------------------
+    # Scheduler / Task Events
+    # ------------------------------------------------------------------
+    TASK_SCHEDULED = "task_scheduled"
+    TASK_STARTED = "task_started"
+    TASK_COMPLETED = "task_completed"
+    TASK_FAILED = "task_failed"
+    
+    # ------------------------------------------------------------------
+    # Orchestrator (long-running projects)
+    # ------------------------------------------------------------------
+    ORCHESTRATOR_UPDATE = "orchestrator_update"
+    ORCHESTRATOR_REQUEST = "orchestrator_request"
+    ORCHESTRATOR_SNAPSHOT = "orchestrator_snapshot"
+    
+    # ------------------------------------------------------------------
+    # Runs (interactive + workflows): lifecycle, steps, verification, evidence
+    # ------------------------------------------------------------------
+    RUN_UPDATE = "run_update"
+    RUN_SNAPSHOT = "run_snapshot"
 
     # Wake Word Training
     WAKE_WORD_RECORD_REQUEST = "wake_word_record_request"

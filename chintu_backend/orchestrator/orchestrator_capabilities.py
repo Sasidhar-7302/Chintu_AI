@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from ..core.capabilities import ActionResult, Capability, CapabilityRegistry, CapabilityType, get_registry
 from .manager import get_orchestrator_manager
 from .models import ProjectStatus, StepStatus
+from .templates import match_template, build_pipeline_spec
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +71,111 @@ def _format_preview(spec: Dict[str, Any]) -> str:
     ]
     for i, step in enumerate(spec.get("steps") or [], start=1):
         risk = step.get("risk_level", "low")
-        risk_flag = " [approval]" if risk in {"high", "critical"} else ""
-        lines.append(f"{i}. {step.get('title', f'Step {i}')}{risk_flag}")
+        approval_flag = " [approval]" if risk in {"high", "critical"} or step.get("approval_required") else ""
+        agent = step.get("assigned_agent") or step.get("agent_role")
+        agent_flag = f" (agent: {agent})" if agent else ""
+        lines.append(f"{i}. {step.get('title', f'Step {i}')}{agent_flag}{approval_flag}")
     return "\n".join(lines)
+
+
+def handle_orchestrator_create_pipeline(text: str, context: Dict[str, Any]) -> ActionResult:
+    manager = get_orchestrator_manager()
+    request = _strip_prefix(
+        text,
+        prefixes=(
+            "create pipeline",
+            "build pipeline",
+            "business pipeline",
+            "product pipeline",
+            "launch business",
+            "launch product",
+            "startup plan",
+            "go to market",
+            "gtm plan",
+        ),
+    )
+    if not request:
+        return ActionResult.fail("Describe the pipeline you want me to build.", "orchestrator_create_pipeline")
+
+    defaults = manager._defaults()
+    template_key = match_template(request)
+    if template_key:
+        spec = build_pipeline_spec(template_key, request, defaults)
+    else:
+        spec = manager.planner.plan(request, defaults)
+        metadata = dict(spec.get("metadata") or {})
+        # Default: approvals only for high/critical risk steps (payments, deletion, posting, etc.).
+        # Users still approve the overall plan at project creation time.
+        metadata.setdefault("approval_mode", "risk_based")
+        metadata.setdefault("template", "custom_pipeline")
+        spec["metadata"] = metadata
+        for step in spec.get("steps") or []:
+            step.setdefault("assigned_agent", "primary")
+            # Keep risk-based approval behavior unless the planner explicitly opted in.
+            step.setdefault("approval_required", str(step.get("risk_level", "")).lower() in {"high", "critical"})
+
+    preview = _format_preview(spec)
+    if context.get("_plan_only"):
+        return ActionResult.ok(preview, capability="orchestrator_create_pipeline")
+
+    auto_run = bool(re.search(r"\b(start|run)\s+(now|immediately)\b", text.lower()))
+
+    def _do_create() -> ActionResult:
+        result = manager.create_project_from_spec(spec, source_request=request, auto_run=auto_run)
+        project = result["project"]
+        steps = result["steps"]
+        missing_inputs = result["missing_inputs"]
+        approvals = result["pending_approvals"]
+
+        lines = [
+            f"Pipeline created: '{project.name}' ({project.id[:8]}).",
+            f"Steps: {len(steps)}. Run window: {project.run_start_hour:02d}:00-{project.run_end_hour:02d}:00.",
+            "I will ask before every step.",
+        ]
+        if missing_inputs:
+            lines.append("Missing inputs: " + ", ".join(missing_inputs[:8]))
+        if approvals:
+            lines.append(f"Pending approvals: {len(approvals)} step(s).")
+        lines.append(f"Try: 'project status {project.id[:8]}' or 'run project {project.id[:8]}'.")
+
+        return ActionResult.ok(
+            "\n".join(lines),
+            data={
+                "project_id": project.id,
+                "steps": len(steps),
+                "missing_inputs": missing_inputs,
+                "pending_approvals": len(approvals),
+            },
+            capability="orchestrator_create_pipeline",
+        )
+
+    message = "I can set up this pipeline. Review the plan and confirm to proceed:\n\n" + preview
+    return ActionResult.confirm(message, _do_create, "orchestrator_create_pipeline")
+
+
+def handle_orchestrator_review_inputs(text: str, context: Dict[str, Any]) -> ActionResult:
+    manager = get_orchestrator_manager()
+    project_id = context.get("_orchestrator_project_id") or _extract_id(text, "project")
+    project = manager.get_project(project_id) if project_id else _resolve_project("")
+    if not project:
+        return ActionResult.fail("I couldn't find that project.", "orchestrator_review_inputs")
+
+    inputs = manager.store.list_inputs(project_id=project.id)
+    if not inputs:
+        return ActionResult.fail("No inputs collected yet.", "orchestrator_review_inputs")
+
+    lines = [f"Project inputs for '{project.name}':"]
+    for item in inputs[:20]:
+        value = item.get("masked_value") or ""
+        secret_flag = " (secret)" if item.get("is_secret") else ""
+        lines.append(f"- {item['key']}: {value}{secret_flag}")
+
+    missing = manager.list_missing_inputs(project.id)
+    if missing:
+        lines.append("")
+        lines.append("Missing inputs: " + ", ".join(missing[:12]))
+
+    return ActionResult.ok("\n".join(lines), capability="orchestrator_review_inputs")
 
 
 def handle_orchestrator_create(text: str, context: Dict[str, Any]) -> ActionResult:
@@ -339,6 +442,26 @@ def register_orchestrator_capabilities(registry: Optional[CapabilityRegistry] = 
 
     registry.register(
         Capability(
+            name="orchestrator_create_pipeline",
+            triggers=[
+                "create pipeline",
+                "build pipeline",
+                "business pipeline",
+                "product pipeline",
+                "startup plan",
+                "launch business",
+                "launch product",
+                "go to market",
+                "gtm plan",
+            ],
+            handler=handle_orchestrator_create_pipeline,
+            description="create a business/product pipeline with approvals",
+            capability_type=CapabilityType.AI_AGENT,
+        )
+    )
+
+    registry.register(
+        Capability(
             name="orchestrator_project_status",
             triggers=[
                 "project status",
@@ -405,6 +528,21 @@ def register_orchestrator_capabilities(registry: Optional[CapabilityRegistry] = 
             ],
             handler=handle_orchestrator_missing_inputs,
             description="list missing project inputs",
+            capability_type=CapabilityType.PRODUCTIVITY,
+        )
+    )
+
+    registry.register(
+        Capability(
+            name="orchestrator_review_inputs",
+            triggers=[
+                "review project inputs",
+                "summarize project inputs",
+                "review inputs",
+                "project brief",
+            ],
+            handler=handle_orchestrator_review_inputs,
+            description="summarize stored project inputs",
             capability_type=CapabilityType.PRODUCTIVITY,
         )
     )

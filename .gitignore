@@ -1,80 +1,47 @@
 # Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual Environment
 venv/
-ENV/
-env/
-.venv/
-myenv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
 
-# IDE
+# Runtime + local state
+.tmp/
+.chintu/
+logs/
+.claude/
+.GCC/
+brain_md/
+data/
+.env
+.env.local
+.env.*.local
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+
+# Generated reports/artifacts
+generated_reports/
+data/reports/
+dist/
+
+# Flutter/Dart build artifacts
+chintu_ui/.dart_tool/
+chintu_ui/build/
+chintu_ui/.packages
+chintu_ui/.flutter-plugins
+chintu_ui/.flutter-plugins-dependencies
+chintu_ui/.metadata
+chintu_ui/windows/flutter/ephemeral/
+chintu_ui/analysis_output*.txt
+chintu_ui/flutter_*.log
+
+# IDE/OS noise
 .idea/
 .vscode/
 *.swp
-*.swo
-*~
-
-# Environment files
-.env
-.env.local
-.env.production
-!.env.example
-
-# Database
-*.db
-*.sqlite3
-chroma_db/
-
-# Logs
-logs/
-*.log
-
-# Testing
-.coverage
-htmlcov/
-.pytest_cache/
-.tox/
-.nox/
-
-# Node.js
-node_modules/
-.next/
-out/
-.npm
-*.tsbuildinfo
-
-# Build outputs
-build/
-dist/
-
-# OS files
+*.tmp
 .DS_Store
 Thumbs.db
-
-# Docker
-docker-compose.override.yml
-
-# Secrets
-*.pem
-*.key
-secrets/
-

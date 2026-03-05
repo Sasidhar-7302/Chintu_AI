@@ -173,6 +173,7 @@ class SwarmIntegration:
             "planner": self.config.swarm_planner_model,
             "coder": self.config.swarm_coder_model,
             "researcher": self.config.swarm_researcher_model,
+            "orchestrator": self.config.swarm_orchestrator_model,
             "browser": "browser-fallback",
         }
         return model_map.get(source, "unknown")

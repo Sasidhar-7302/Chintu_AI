@@ -22,6 +22,12 @@ from .offline_mode import (
     get_degraded_mode,
     reset_degraded_mode,
 )
+from .action_approvals import (
+    ActionApprovalLedger,
+    get_action_approval_ledger,
+    reset_action_approval_ledger,
+)
+from .unified_resolver import UnifiedPolicyResolver, ResolverDecision, ResolverOutcome
 
 __all__ = [
     "RiskLevel",
@@ -41,4 +47,10 @@ __all__ = [
     "CapabilityAvailability",
     "get_degraded_mode",
     "reset_degraded_mode",
+    "ActionApprovalLedger",
+    "get_action_approval_ledger",
+    "reset_action_approval_ledger",
+    "UnifiedPolicyResolver",
+    "ResolverDecision",
+    "ResolverOutcome",
 ]
